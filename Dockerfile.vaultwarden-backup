@@ -1,0 +1,58 @@
+FROM golang:alpine AS rclone-builder
+
+ARG VERSION
+
+RUN apk add --no-cache git
+
+WORKDIR /build
+
+RUN git clone --depth 1 --branch "${VERSION}" https://github.com/rclone/rclone.git .
+
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-w -s" -o rclone
+
+FROM debian:trixie-slim AS tool-builder
+
+ARG TARGET_BINS="/usr/bin/sqlite3 /usr/lib/7zip/7zz /bin/bash /bin/cp /bin/rm /bin/mkdir /usr/bin/date /usr/bin/find"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    sqlite3 7zip-standalone coreutils findutils ca-certificates tzdata binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /rootfs
+
+RUN set -ex; \
+    mkdir -p bin sbin usr/bin usr/sbin usr/lib/7zip etc/ssl/certs etc/zoneinfo tmp var/log; \
+    for bin in $TARGET_BINS; do \
+        REAL_BIN=$(realpath "$bin"); \
+        cp --parents -v -L "$REAL_BIN" ./; \
+        if [ "$REAL_BIN" != "$bin" ]; then cp --parents -v -L "$bin" ./; fi; \
+        INTERP=$(readelf -l "$REAL_BIN" | grep "program interpreter" | sed 's/.*: \(.*\)]/\1/') || true; \
+        if [ -n "$INTERP" ]; then cp --parents -v -L "$INTERP" ./; fi; \
+        ldd "$REAL_BIN" | awk 'NF == 4 {print $3}; NF == 2 {print $1}' | grep "^/" | sort -u | xargs -I '{}' cp --parents -v -L "{}" ./; \
+    done; \
+    ln -sf /usr/lib/7zip/7zz ./usr/bin/7zz; \
+    cp -a /etc/ssl/certs/. etc/ssl/certs/; \
+    cp -a /usr/share/zoneinfo/. etc/zoneinfo/
+
+RUN set -ex; \
+    mkdir -p usr/lib; \
+    if [ -d "lib" ]; then cp -a lib/. usr/lib/ && rm -rf lib; fi; \
+    if [ -d "lib64" ]; then cp -a lib64/. usr/lib/ && rm -rf lib64; fi; \
+    ln -s usr/lib lib; \
+    ln -s usr/lib lib64
+
+FROM scratch
+
+COPY --from=tool-builder /rootfs/ /
+
+WORKDIR /app
+
+COPY --from=rclone-builder /build/rclone /usr/bin/rclone
+
+COPY /scripts/backup.sh /app/backup.sh
+COPY /scripts/restore.sh /app/restore.sh
+
+ENV PATH="/usr/sbin:/usr/bin:/sbin:/bin:/app"
+ENV TZ=Asia/Bangkok
+
+ENTRYPOINT ["/bin/bash", "/app/backup.sh"]

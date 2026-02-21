@@ -1,0 +1,106 @@
+FROM golang:alpine AS builder
+
+ARG VERSION
+
+RUN apk add --no-cache git build-base tzdata ca-certificates
+
+WORKDIR /build
+
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/0xERR0R/blocky.git .
+
+RUN CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags="-w -s -X github.com/0xERR0R/blocky/util.Version=${VERSION}" \
+    -o blocky \
+    ./main.go
+
+RUN cat <<EOF > healthcheck.c
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int get_port_from_config() {
+    FILE *f = fopen("/app/config.yml", "r");
+    if (!f) return 53;
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char *p = strstr(line, "dns:");
+        if (p) {
+            int port = atoi(p + 4); 
+            if (port > 0 && port <= 65535) {
+                fclose(f);
+                return port;
+            }
+        }
+    }
+    fclose(f);
+    return 53;
+}
+
+int main() {
+    int port = get_port_from_config();
+
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 1;
+
+    int flags = fcntl(s, F_GETFL, 0);
+    fcntl(s, F_SETFL, flags | O_NONBLOCK);
+
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    int r = connect(s, (struct sockaddr *)&a, sizeof(a));
+
+    if (r < 0 && errno == EINPROGRESS) {
+        fd_set master;
+        FD_ZERO(&master);
+        FD_SET(s, &master);
+        struct timeval timeout = { .tv_sec = 2, .tv_usec = 0 };
+        r = select(s + 1, NULL, &master, NULL, &timeout);
+        if (r > 0) {
+            int err; socklen_t len = sizeof err;
+            getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &len);
+            r = (err == 0) ? 0 : -1;
+        } else r = -1;
+    }
+
+    close(s);
+    return (r == 0) ? 0 : 1;
+}
+EOF
+
+RUN gcc -static -Os -march=native -o healthcheck healthcheck.c && \
+    strip healthcheck
+
+RUN echo "blocky:x:1000:1000:blocky:/app:/sbin/nologin" > /etc/passwd.custom && \
+    echo "blocky:x:1000:" > /etc/group.custom
+
+FROM scratch
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
+COPY --from=builder /etc/passwd.custom /etc/passwd
+COPY --from=builder /etc/group.custom /etc/group
+
+WORKDIR /app
+
+COPY --from=builder /build/blocky /app/blocky
+COPY --from=builder /build/healthcheck /app/healthcheck
+
+USER 1000:1000
+
+ENV TZ=Asia/Bangkok
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/app/healthcheck"]
+
+ENTRYPOINT ["/app/blocky"]

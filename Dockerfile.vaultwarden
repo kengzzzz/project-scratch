@@ -1,0 +1,95 @@
+FROM rust:alpine AS builder
+
+ARG VW_VERSION
+ARG WV_VERSION
+
+RUN apk add --no-cache \
+    build-base \
+    git \
+    curl \
+    pkgconfig \
+    openssl-dev \
+    openssl-libs-static \
+    sqlite-dev \
+    sqlite-static \
+    ca-certificates \
+    tzdata
+
+WORKDIR /app
+
+RUN mkdir -p web-vault \
+    && curl -L "https://github.com/dani-garcia/bw_web_builds/releases/download/${WV_VERSION}/bw_web_${WV_VERSION}.tar.gz" \
+    | tar xz -C web-vault --strip-components=1
+
+RUN find web-vault -name "*.map" -type f -delete && \
+    rm -rf web-vault/videos && \
+    if [ -d "web-vault/locales" ]; then \
+        find web-vault/locales -maxdepth 1 -type d ! -name "locales" ! -name "en" -exec rm -rf {} +; \
+    fi
+
+WORKDIR /src
+RUN git clone --depth 1 --branch ${VW_VERSION} https://github.com/dani-garcia/vaultwarden.git .
+
+ENV OPENSSL_STATIC=1
+
+RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
+    RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" \
+    cargo build --features "sqlite" --release --target "$TARGET" && \
+    cp "target/$TARGET/release/vaultwarden" target/release/vaultwarden
+
+RUN cat <<EOF > healthcheck.c
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <stdlib.h>
+
+int main() {
+    char *port_env = getenv("ROCKET_PORT");
+    int port = port_env ? atoi(port_env) : 80;
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 1;
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    int r = connect(s, (struct sockaddr *)&a, sizeof(a));
+    close(s);
+    return (r == 0) ? 0 : 1;
+}
+EOF
+
+RUN gcc -Os -static -march=native -o healthcheck healthcheck.c && \
+    strip healthcheck && \
+    strip target/release/vaultwarden
+
+RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/tmp /rootfs/data /rootfs/usr/share && \
+    chmod 1777 /rootfs/tmp && \
+    echo "vaultwarden:x:1000:1000:vaultwarden:/var/empty:/sbin/nologin" > /rootfs/etc/passwd && \
+    echo "vaultwarden:x:1000:" > /rootfs/etc/group && \
+    cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && \
+    cp -r /usr/share/zoneinfo /rootfs/usr/share/
+
+FROM scratch
+
+COPY --from=builder /rootfs/etc/passwd /etc/passwd
+COPY --from=builder /rootfs/etc/group /etc/group
+COPY --from=builder /rootfs/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /rootfs/usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=builder /rootfs/tmp /tmp
+
+COPY --from=builder /src/target/release/vaultwarden /usr/bin/vaultwarden
+COPY --from=builder /src/healthcheck /usr/bin/healthcheck
+
+COPY --from=builder --chown=1000:1000 /app/web-vault /web-vault
+COPY --from=builder --chown=1000:1000 /rootfs/data /data
+
+USER 1000:1000
+
+WORKDIR /data
+
+ENV WEB_VAULT_FOLDER=/web-vault
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/bin/healthcheck"]
+
+ENTRYPOINT ["/usr/bin/vaultwarden"]

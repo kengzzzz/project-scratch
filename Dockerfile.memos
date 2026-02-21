@@ -1,0 +1,74 @@
+FROM golang:alpine AS builder
+
+ARG VERSION
+
+RUN apk add --no-cache ca-certificates curl git unzip libstdc++ gcompat bash build-base gcc musl-dev
+
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+WORKDIR /build
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/usememos/memos.git .
+
+WORKDIR /build/web
+RUN bun install && bun run build
+
+WORKDIR /build
+RUN mkdir -p server/router/frontend/dist && cp -r web/dist/* server/router/frontend/dist/
+
+RUN CGO_ENABLED=1 go build -trimpath \
+    -ldflags="-w -s -linkmode external -extldflags '-static'" \
+    -tags="netgo,osusergo,cleansqlite" \
+    -o /build/memos ./cmd/memos/main.go
+
+RUN cat <<'EOF' > healthcheck.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        return 1;
+    }
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in serv_addr;
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(atoi(argv[2]));
+
+    if (inet_pton(AF_INET, argv[1], &serv_addr.sin_addr) <= 0) {
+        return 1;
+    }
+
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        close(sock);
+        return 1;
+    }
+
+    close(sock);
+    return 0;
+}
+EOF
+
+RUN gcc -static -Os -s -o /build/healthcheck /build/healthcheck.c && strip /build/healthcheck
+
+RUN echo "memos:x:1000:1000:memos:/app:/sbin/nologin" > /etc/passwd.custom && \
+    echo "memos:x:1000:" > /etc/group.custom
+
+FROM scratch
+
+COPY --from=builder /etc/passwd.custom /etc/passwd
+COPY --from=builder /etc/group.custom /etc/group
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /build/healthcheck /healthcheck
+COPY --from=builder /build/memos /memos
+
+USER 1000:1000
+
+WORKDIR /var/opt/memos
+
+HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 CMD  ["/healthcheck", "127.0.0.1", "8081"]
+
+ENTRYPOINT ["/memos"]

@@ -1,0 +1,33 @@
+FROM golang:alpine AS builder
+
+ARG VERSION
+
+RUN apk add --no-cache ca-certificates git
+
+WORKDIR /build
+
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/henrygd/beszel.git .
+
+WORKDIR /build/internal/cmd/agent
+
+RUN CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags="-w -s" \
+    -o /build/beszel-agent \
+    ./agent.go
+
+RUN echo "beszel:x:1000:1000:beszel:/tmp:/sbin/nologin" > /etc/passwd.custom && \
+    echo "beszel:x:1000:" > /etc/group.custom
+
+FROM scratch
+
+COPY --from=builder /etc/passwd.custom /etc/passwd
+COPY --from=builder /etc/group.custom /etc/group
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /build/beszel-agent /agent
+
+USER 1000:1000
+
+HEALTHCHECK --interval=120s --timeout=10s --start-period=10s --retries=3 CMD ["/agent", "health"]
+
+ENTRYPOINT ["/agent"]

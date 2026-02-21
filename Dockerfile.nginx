@@ -1,0 +1,119 @@
+FROM alpine:latest AS builder
+
+ARG VERSION
+
+RUN apk add --no-cache \
+    git \
+    make \
+    gcc \
+    g++ \
+    linux-headers \
+    musl-dev \
+    pcre-dev \
+    pcre-static \
+    zlib-dev \
+    zlib-static \
+    openssl-dev \
+    openssl-libs-static \
+    pkgconf
+
+WORKDIR /src
+
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/nginx/nginx.git .
+
+RUN ./auto/configure \
+    --prefix=/etc/nginx \
+    --sbin-path=/usr/sbin/nginx \
+    --modules-path=/usr/lib/nginx/modules \
+    --conf-path=/etc/nginx/nginx.conf \
+    --error-log-path=/dev/stderr \
+    --http-log-path=/dev/stdout \
+    --pid-path=/tmp/nginx.pid \
+    --lock-path=/tmp/nginx.lock \
+    --http-client-body-temp-path=/tmp/client_body \
+    --http-proxy-temp-path=/tmp/proxy_temp \
+    --http-fastcgi-temp-path=/tmp/fastcgi_temp \
+    --http-uwsgi-temp-path=/tmp/uwsgi_temp \
+    --http-scgi-temp-path=/tmp/scgi_temp \
+    --user=nginx \
+    --group=nginx \
+    --with-threads \
+    --with-http_ssl_module \
+    --with-http_v2_module \
+    --with-stream \
+    --with-stream_ssl_module \
+    --with-cc-opt="-static -O2" \
+    --with-ld-opt="-static" \
+    --without-http_gzip_module \
+    --without-http_charset_module \
+    --without-http_ssi_module \
+    --without-http_userid_module \
+    --without-http_access_module \
+    --without-http_auth_basic_module \
+    --without-http_mirror_module \
+    --without-http_autoindex_module \
+    --without-http_geo_module \
+    --without-http_split_clients_module \
+    --without-http_referer_module \
+    --without-http_browser_module \
+    --without-http_uwsgi_module \
+    --without-http_scgi_module \
+    --without-http_grpc_module \
+    --without-http_memcached_module \
+    --without-http_fastcgi_module \
+    --without-mail_pop3_module \
+    --without-mail_imap_module \
+    --without-mail_smtp_module \
+    && make -j$(nproc) \
+    && make DESTDIR=/target-root install
+
+RUN strip /target-root/usr/sbin/nginx
+
+RUN mkdir -p /target-root/etc \
+             /target-root/tmp \
+             /target-root/var/log/nginx \
+             /target-root/usr/bin && \
+    echo "nginx:x:1000:1000:nginx:/nonexistent:/sbin/nologin" > /target-root/etc/passwd && \
+    echo "nginx:x:1000:" > /target-root/etc/group
+
+RUN cat <<'EOF' > healthcheck.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+int main() {
+    int sock = 0;
+    struct sockaddr_in serv_addr;
+
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) return 1;
+
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(80);
+
+    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) return 1;
+
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) return 1;
+
+    close(sock);
+    return 0;
+}
+EOF
+
+RUN gcc -static -Os -s -o /target-root/usr/bin/healthcheck healthcheck.c
+
+FROM scratch
+
+COPY --from=builder /target-root/etc /etc
+COPY --from=builder /target-root/usr /usr
+COPY --from=builder --chown=1000:1000 /target-root/tmp /tmp
+COPY --from=builder --chown=1000:1000 /target-root/var /var
+
+USER 1000:1000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/bin/healthcheck"]
+
+ENTRYPOINT ["/usr/sbin/nginx", "-g", "daemon off;"]

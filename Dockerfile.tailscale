@@ -1,0 +1,67 @@
+FROM golang:alpine AS tailscale-builder
+
+ARG VERSION
+
+RUN apk add --no-cache git
+
+WORKDIR /build
+
+RUN git clone --depth 1 --branch "${VERSION}" https://github.com/tailscale/tailscale.git .
+
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-w -s" -o tailscaled ./cmd/tailscaled && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-w -s" -o tailscale ./cmd/tailscale
+
+FROM debian:trixie-slim AS tool-builder
+
+ARG TARGET_BINS="/usr/sbin/iptables /usr/sbin/iptables-save /usr/sbin/iptables-restore /usr/sbin/ip"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    iptables \
+    iproute2 \
+    ca-certificates \
+    dpkg-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /rootfs
+
+RUN set -ex; \
+    mkdir -p bin sbin usr/bin usr/sbin etc/ssl/certs tmp var/lib/tailscale; \
+    for bin in $TARGET_BINS; do \
+        cp --parents -v -L "$bin" ./; \
+        ldd "$bin" | awk 'NF == 4 {print $3}; NF == 2 {print $1}' | grep "^/" | sort -u | xargs -I '{}' cp --parents -v -L "{}" ./; \
+    done; \
+    TRIPLET=$(dpkg-architecture -qDEB_HOST_MULTIARCH); \
+    XTABLES_DIR="/usr/lib/$TRIPLET/xtables"; \
+    if [ -d "$XTABLES_DIR" ]; then \
+        cp --parents -r "$XTABLES_DIR" ./; \
+    fi; \
+    cp -a /etc/ssl/certs/. etc/ssl/certs/
+
+RUN set -ex; \
+    mkdir -p usr/lib; \
+    if [ -d "lib" ]; then cp -a lib/. usr/lib/ && rm -rf lib; fi; \
+    if [ -d "lib64" ]; then cp -a lib64/. usr/lib/ && rm -rf lib64; fi; \
+    ln -s usr/lib lib; \
+    ln -s usr/lib lib64
+
+FROM scratch
+
+COPY --from=tool-builder /rootfs/ /
+
+WORKDIR /app
+
+COPY --from=tailscale-builder /build/tailscaled /app/tailscaled
+COPY --from=tailscale-builder /build/tailscale /app/tailscale
+
+ENV PATH="/usr/sbin:/usr/bin:/sbin:/bin:/app"
+ENV IPTABLES_PATH="/usr/sbin/iptables"
+
+COPY --from=tool-builder /tmp /var/lib/tailscale
+COPY --from=tool-builder /tmp /tmp
+
+HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 CMD  ["/app/tailscale", "--socket=/tmp/tailscaled.sock", "status"]
+
+ENTRYPOINT ["/app/tailscaled", \
+    "--state=/var/lib/tailscale/tailscaled.state", \
+    "--socket=/tmp/tailscaled.sock", \
+    "--socks5-server=localhost:1055"]

@@ -1,0 +1,55 @@
+FROM alpine:latest AS builder
+
+ARG VERSION
+
+RUN apk add --no-cache \
+    git \
+    make \
+    gcc \
+    g++ \
+    linux-headers \
+    musl-dev \
+    openssl-dev \
+    openssl-libs-static \
+    pkgconf
+
+WORKDIR /src
+
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/redis/redis.git .
+
+RUN make -j "$(nproc)" \
+    BUILD_TLS=yes \
+    MALLOC=libc \
+    LDFLAGS="-static" \
+    CFLAGS="-static"
+
+RUN mkdir -p /target-root/etc /target-root/data && \
+    echo "redis:x:1000:1000:redis:/nonexistent:/sbin/nologin" > /target-root/etc/passwd && \
+    echo "redis:x:1000:" > /target-root/etc/group && \
+    strip /src/src/redis-server && \
+    strip /src/src/redis-cli && \
+    cp /src/src/redis-server /target-root/ && \
+    cp /src/src/redis-cli /target-root/ && \
+    cp /src/redis.conf /target-root/etc/ && \
+    chown -R 1000:1000 /target-root/data
+
+RUN sed -i 's/^bind.*/bind 0.0.0.0/' /target-root/etc/redis.conf && \
+    sed -i 's/^protected-mode yes/protected-mode no/' /target-root/etc/redis.conf && \
+    sed -i 's/^dir .*/dir \/data/' /target-root/etc/redis.conf
+
+FROM scratch
+
+COPY --from=builder /target-root/etc/passwd /etc/passwd
+COPY --from=builder /target-root/etc/group /etc/group
+COPY --from=builder /target-root/etc/redis.conf /etc/redis.conf
+COPY --from=builder --chown=1000:1000 /target-root/data /data
+COPY --from=builder /target-root/redis-server /redis-server
+COPY --from=builder /target-root/redis-cli /redis-cli
+
+USER 1000:1000
+
+WORKDIR /data
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/redis-cli", "ping"]
+
+ENTRYPOINT ["/redis-server", "/etc/redis.conf"]

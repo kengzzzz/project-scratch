@@ -1,0 +1,94 @@
+FROM rust:trixie AS builder
+
+ARG VERSION
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    pkg-config \
+    libsnappy-dev \
+    libzstd-dev \
+    liblz4-dev \
+    zlib1g-dev \
+    libbz2-dev \
+    libssl-dev \
+    clang \
+    llvm-dev \
+    libclang-dev \
+    ca-certificates \
+    tzdata \
+    musl-tools
+
+WORKDIR /build
+
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/romanz/electrs .
+
+RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
+    RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" \
+    CXXFLAGS="-w -fpermissive -include cstdint" \
+    LIBROCKSDB_SYS_STATIC=1 \
+    cargo build --locked --release \
+    --target "$TARGET" && \
+    cp "target/$TARGET/release/electrs" target/release/electrs
+
+RUN cat <<EOF > healthcheck.c
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+int main(int argc, char* argv[]) {
+    if (argc != 3) return 1;
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return 1;
+
+    struct sockaddr_in serv_addr;
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(atoi(argv[2]));
+
+    if (inet_pton(AF_INET, argv[1], &serv_addr.sin_addr) <= 0) {
+        return 1;
+    }
+
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        return 1;
+    }
+
+    close(sock);
+    return 0;
+}
+EOF
+
+RUN musl-gcc -static -Os -o healthcheck healthcheck.c && \
+    strip healthcheck && \
+    strip target/release/electrs
+
+RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/tmp /rootfs/data /rootfs/usr/share && \
+    chmod 1777 /rootfs/tmp && \
+    echo "electrs:x:1000:1000:electrs:/data:/sbin/nologin" > /rootfs/etc/passwd && \
+    echo "electrs:x:1000:" > /rootfs/etc/group && \
+    cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && \
+    cp -r /usr/share/zoneinfo /rootfs/usr/share/
+
+FROM scratch
+
+COPY --from=builder /rootfs/etc/passwd /etc/passwd
+COPY --from=builder /rootfs/etc/group /etc/group
+COPY --from=builder /rootfs/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /rootfs/usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=builder /rootfs/tmp /tmp
+COPY --from=builder --chown=1000:1000 /rootfs/data /data
+
+COPY --from=builder /build/target/release/electrs /usr/bin/electrs
+COPY --from=builder /build/healthcheck /usr/bin/healthcheck
+
+USER 1000:1000
+
+WORKDIR /data
+
+HEALTHCHECK --interval=60s --timeout=5s --start-period=15s --retries=3 CMD ["/usr/bin/healthcheck", "127.0.0.1", "50001"]
+
+ENTRYPOINT ["/usr/bin/electrs"]
