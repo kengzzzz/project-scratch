@@ -2,7 +2,7 @@ FROM golang:alpine AS builder
 
 ARG VERSION
 
-RUN apk add --no-cache ca-certificates git
+RUN apk add --no-cache ca-certificates git tzdata
 
 WORKDIR /build
 
@@ -24,9 +24,12 @@ FROM scratch
 COPY --from=builder /etc/passwd.custom /etc/passwd
 COPY --from=builder /etc/group.custom /etc/group
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
 COPY --from=builder /build/beszel-agent /agent
 
 USER 1000:1000
+
+ENV TZ=Asia/Bangkok
 
 HEALTHCHECK --interval=120s --timeout=10s --start-period=10s --retries=3 CMD ["/agent", "health"]
 

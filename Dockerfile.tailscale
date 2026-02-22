@@ -47,17 +47,19 @@ RUN set -ex; \
 FROM scratch
 
 COPY --from=tool-builder /rootfs/ /
+COPY --from=tool-builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
 
 WORKDIR /app
 
 COPY --from=tailscale-builder /build/tailscaled /app/tailscaled
 COPY --from=tailscale-builder /build/tailscale /app/tailscale
 
-ENV PATH="/usr/sbin:/usr/bin:/sbin:/bin:/app"
-ENV IPTABLES_PATH="/usr/sbin/iptables"
-
 COPY --from=tool-builder /tmp /var/lib/tailscale
 COPY --from=tool-builder /tmp /tmp
+
+ENV PATH="/usr/sbin:/usr/bin:/sbin:/bin:/app"
+ENV IPTABLES_PATH="/usr/sbin/iptables"
+ENV TZ=Asia/Bangkok
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 CMD  ["/app/tailscale", "--socket=/tmp/tailscaled.sock", "status"]
 

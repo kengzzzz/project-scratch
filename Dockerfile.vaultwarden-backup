@@ -32,7 +32,7 @@ RUN set -ex; \
     done; \
     ln -sf /usr/lib/7zip/7zz ./usr/bin/7zz; \
     cp -a /etc/ssl/certs/. etc/ssl/certs/; \
-    cp -a /usr/share/zoneinfo/. etc/zoneinfo/
+    cp -a /usr/share/zoneinfo/Asia/Bangkok etc/zoneinfo/Asia/Bangkok
 
 RUN set -ex; \
     mkdir -p usr/lib; \

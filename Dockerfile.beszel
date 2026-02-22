@@ -9,7 +9,8 @@ RUN apk add --no-cache \
     unzip \
     libstdc++ \
     gcompat \
-    bash
+    bash \
+    tzdata
 
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
@@ -37,9 +38,12 @@ FROM scratch
 COPY --from=builder /etc/passwd.custom /etc/passwd
 COPY --from=builder /etc/group.custom /etc/group
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
 COPY --from=builder /build/beszel-hub /hub
 
 USER 1000:1000
+
+ENV TZ=Asia/Bangkok
 
 HEALTHCHECK --interval=120s --timeout=10s --start-period=10s --retries=3 CMD ["/hub", "health", "--url", "http://127.0.0.1:8090"]
 

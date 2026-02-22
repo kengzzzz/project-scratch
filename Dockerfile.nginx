@@ -15,7 +15,8 @@ RUN apk add --no-cache \
     zlib-static \
     openssl-dev \
     openssl-libs-static \
-    pkgconf
+    pkgconf \
+    tzdata
 
 WORKDIR /src
 
@@ -111,8 +112,11 @@ COPY --from=builder /target-root/etc /etc
 COPY --from=builder /target-root/usr /usr
 COPY --from=builder --chown=1000:1000 /target-root/tmp /tmp
 COPY --from=builder --chown=1000:1000 /target-root/var /var
+COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
 
 USER 1000:1000
+
+ENV TZ=Asia/Bangkok
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/bin/healthcheck"]
 

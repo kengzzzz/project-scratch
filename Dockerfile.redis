@@ -11,7 +11,8 @@ RUN apk add --no-cache \
     musl-dev \
     openssl-dev \
     openssl-libs-static \
-    pkgconf
+    pkgconf \
+    tzdata
 
 WORKDIR /src
 
@@ -42,6 +43,7 @@ FROM scratch
 COPY --from=builder /target-root/etc/passwd /etc/passwd
 COPY --from=builder /target-root/etc/group /etc/group
 COPY --from=builder /target-root/etc/redis.conf /etc/redis.conf
+COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
 COPY --from=builder --chown=1000:1000 /target-root/data /data
 COPY --from=builder /target-root/redis-server /redis-server
 COPY --from=builder /target-root/redis-cli /redis-cli
@@ -49,6 +51,8 @@ COPY --from=builder /target-root/redis-cli /redis-cli
 USER 1000:1000
 
 WORKDIR /data
+
+ENV TZ=Asia/Bangkok
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/redis-cli", "ping"]
 

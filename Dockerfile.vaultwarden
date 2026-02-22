@@ -75,7 +75,7 @@ FROM scratch
 COPY --from=builder /rootfs/etc/passwd /etc/passwd
 COPY --from=builder /rootfs/etc/group /etc/group
 COPY --from=builder /rootfs/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder /rootfs/usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=builder /rootfs/usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
 COPY --from=builder /rootfs/tmp /tmp
 
 COPY --from=builder /src/target/release/vaultwarden /usr/bin/vaultwarden
@@ -89,6 +89,7 @@ USER 1000:1000
 WORKDIR /data
 
 ENV WEB_VAULT_FOLDER=/web-vault
+ENV TZ=Asia/Bangkok
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/bin/healthcheck"]
 

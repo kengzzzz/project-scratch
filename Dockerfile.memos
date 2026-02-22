@@ -2,7 +2,7 @@ FROM golang:alpine AS builder
 
 ARG VERSION
 
-RUN apk add --no-cache ca-certificates curl git unzip libstdc++ gcompat bash build-base gcc musl-dev
+RUN apk add --no-cache ca-certificates curl git unzip libstdc++ gcompat bash build-base gcc musl-dev tzdata
 
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
@@ -62,12 +62,15 @@ FROM scratch
 COPY --from=builder /etc/passwd.custom /etc/passwd
 COPY --from=builder /etc/group.custom /etc/group
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
 COPY --from=builder /build/healthcheck /healthcheck
 COPY --from=builder /build/memos /memos
 
 USER 1000:1000
 
 WORKDIR /var/opt/memos
+
+ENV TZ=Asia/Bangkok
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 CMD  ["/healthcheck", "127.0.0.1", "8081"]
 
