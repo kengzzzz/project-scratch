@@ -1,0 +1,107 @@
+FROM golang:alpine AS builder
+
+ARG VERSION
+
+RUN apk add --no-cache git build-base tzdata ca-certificates nodejs npm
+
+RUN npm install -g pnpm
+
+WORKDIR /build
+
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/authelia/authelia.git .
+
+RUN cd web && \
+    pnpm install && \
+    pnpm build && \
+    cd .. && \
+    mkdir -p internal/server/public_html/api && \
+    cp -r api/* internal/server/public_html/api/
+
+RUN CGO_ENABLED=1 go build \
+    -tags netgo,osusergo,sqlite_omit_load_extension \
+    -ldflags '-linkmode external -extldflags "-static" -s -w' \
+    -trimpath -buildmode=pie \
+    -o authelia \
+    ./cmd/authelia
+
+RUN cat <<EOF > healthcheck.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+
+int discover_listening_port() {
+    FILE *fp = fopen("/proc/net/tcp", "r");
+    if (!fp) return 9091;
+    char line[256];
+    int port = 9091;
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned int p, state;
+        if (sscanf(line, "%*d: %*x:%x %*x:%*x %x", &p, &state) == 2) {
+            if (state == 0x0A) { 
+                port = p; 
+                break; 
+            }
+        }
+    }
+    fclose(fp);
+    return port;
+}
+int main() {
+    int port = discover_listening_port();
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 1;
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+    int r = connect(s, (struct sockaddr *)&a, sizeof(a));
+    if (r < 0 && errno == EINPROGRESS) {
+        fd_set master;
+        FD_ZERO(&master);
+        FD_SET(s, &master);
+        struct timeval timeout = { .tv_sec = 2, .tv_usec = 0 };
+        r = select(s + 1, NULL, &master, NULL, &timeout);
+        if (r > 0) {
+            int err; socklen_t len = sizeof err;
+            getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &len);
+            r = (err == 0) ? 0 : -1;
+        } else r = -1;
+    }
+    close(s);
+    return (r == 0) ? 0 : 1;
+}
+EOF
+
+RUN gcc -static -Os -march=native -o healthcheck healthcheck.c && \
+    strip healthcheck
+
+RUN echo "authelia:x:1000:1000:authelia:/app:/sbin/nologin" > /etc/passwd.custom && \
+    echo "authelia:x:1000:" > /etc/group.custom
+
+FROM scratch
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
+COPY --from=builder /etc/passwd.custom /etc/passwd
+COPY --from=builder /etc/group.custom /etc/group
+
+WORKDIR /app
+
+COPY --from=builder /build/authelia /app/authelia
+COPY --from=builder /build/healthcheck /app/healthcheck
+
+USER 1000:1000
+
+ENV TZ=Asia/Bangkok
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/app/healthcheck"]
+
+ENTRYPOINT ["/app/authelia"]
