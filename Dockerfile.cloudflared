@@ -1,0 +1,64 @@
+FROM golang:alpine AS builder
+
+ARG VERSION
+
+RUN apk add --no-cache git build-base tzdata ca-certificates
+
+WORKDIR /build
+
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/cloudflare/cloudflared.git .
+
+RUN CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags="-w -s" \
+    -o cloudflared \
+    ./cmd/cloudflared
+
+RUN cat <<EOF > healthcheck.c
+#include <stdio.h>
+#include <string.h>
+
+int main() {
+    FILE *fp = fopen("/proc/1/status", "r");
+    if (!fp) return 1;
+
+    char line[256];
+    int healthy = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "State:", 6) == 0) {
+            if (strstr(line, "Z (zombie)") == NULL) {
+                healthy = 1;
+            }
+            break;
+        }
+    }
+    fclose(fp);
+    return healthy ? 0 : 1;
+}
+EOF
+
+RUN gcc -static -Os -march=native -o healthcheck healthcheck.c && \
+    strip healthcheck
+
+RUN echo "cloudflared:x:1000:1000:cloudflared:/app:/sbin/nologin" > /etc/passwd.custom && \
+    echo "cloudflared:x:1000:" > /etc/group.custom
+
+FROM scratch
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
+COPY --from=builder /etc/passwd.custom /etc/passwd
+COPY --from=builder /etc/group.custom /etc/group
+
+WORKDIR /app
+
+COPY --from=builder /build/cloudflared /app/cloudflared
+COPY --from=builder /build/healthcheck /app/healthcheck
+
+USER 1000:1000
+
+ENV TZ=Asia/Bangkok
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/app/healthcheck"]
+
+ENTRYPOINT ["/app/cloudflared"]
