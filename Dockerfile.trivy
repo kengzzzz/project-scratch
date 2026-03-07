@@ -1,0 +1,29 @@
+FROM golang:1.25-alpine AS builder
+
+ARG VERSION
+
+WORKDIR /build
+
+RUN apk add --no-cache git ca-certificates tzdata && git clone --depth 1 --branch "${VERSION}" https://github.com/aquasecurity/trivy.git .
+
+RUN CGO_ENABLED=0 GOEXPERIMENT=jsonv2 go build -trimpath -ldflags="-s -w -extldflags '-static' -X github.com/aquasecurity/trivy/pkg/version/app.ver=${VERSION}" -o trivy ./cmd/trivy
+
+RUN echo "trivy:x:1000:1000:trivy:/app:/sbin/nologin" > /etc/passwd.custom && echo "trivy:x:1000:" > /etc/group.custom && mkdir /empty_tmp
+
+FROM scratch
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /etc/passwd.custom /etc/passwd
+COPY --from=builder /etc/group.custom /etc/group
+COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
+COPY --from=builder --chown=1000:1000 /empty_tmp /tmp
+
+USER 1000:1000
+
+COPY --from=builder /build/trivy /usr/local/bin/trivy
+COPY --from=builder /build/contrib/*.tpl /contrib/
+
+ENV TZ=Asia/Bangkok
+ENV TRIVY_CACHE_DIR="/tmp/trivy-cache"
+
+ENTRYPOINT ["/usr/local/bin/trivy"]

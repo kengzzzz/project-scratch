@@ -1,0 +1,44 @@
+FROM alpine:latest AS builder
+
+ARG VERSION
+
+RUN apk add --no-cache git make gcc g++ bison flex linux-headers musl-dev openssl-dev openssl-libs-static expat-dev expat-static hiredis-dev zlib-static pkgconfig tzdata ca-certificates curl
+
+WORKDIR /src
+
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/NLnetLabs/unbound.git .
+
+RUN ./configure --prefix=/ --sysconfdir=/etc --with-conf-file=/etc/unbound/unbound.conf --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-static-exe --enable-cachedb --with-libhiredis --with-pthreads \
+    CFLAGS="-O3 -static -no-pie -march=native -flto -fomit-frame-pointer -falign-functions=32 -ffunction-sections -fdata-sections" LDFLAGS="-static -no-pie -flto -Wl,--gc-sections"
+
+RUN make -j "$(nproc)" LDFLAGS="-all-static -flto -Wl,--gc-sections" && make DESTDIR=/target-root install
+
+RUN mkdir -p /target-root/etc/unbound/iana /target-root/tmp && \
+    ./unbound-anchor -a /target-root/etc/unbound/iana/root.key || true && \
+    echo "unbound:x:1000:1000:unbound:/nonexistent:/sbin/nologin" > /target-root/etc/passwd && \
+    echo "unbound:x:1000:" > /target-root/etc/group && \
+    strip -s /target-root/sbin/unbound && \
+    strip -s /target-root/sbin/unbound-control && \
+    curl -o /target-root/etc/unbound/root.hints https://www.internic.net/domain/named.cache
+
+FROM scratch
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /target-root/etc/passwd /etc/passwd
+COPY --from=builder /target-root/etc/group /etc/group
+COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
+
+COPY --from=builder /target-root/sbin/unbound /unbound
+COPY --from=builder /target-root/sbin/unbound-control /unbound-control
+
+COPY --from=builder /target-root/etc/unbound/root.hints /etc/unbound/root.hints
+
+COPY --from=builder --chown=1000:1000 /target-root/etc/unbound/iana/root.key /etc/unbound/iana/root.key
+COPY --from=builder --chown=1000:1000 /target-root/tmp /tmp
+
+USER 1000:1000
+ENV TZ=Asia/Bangkok
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/unbound-control", "-c", "/etc/unbound/unbound.conf", "status"]
+
+ENTRYPOINT ["/unbound", "-d", "-c", "/etc/unbound/unbound.conf"]
