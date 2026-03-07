@@ -2,33 +2,21 @@ FROM alpine:latest AS builder
 
 ARG VERSION
 
-RUN apk add --no-cache \
-    git \
-    make \
-    gcc \
-    g++ \
-    linux-headers \
-    musl-dev \
-    openssl-dev \
-    openssl-libs-static \
-    pkgconf \
-    tzdata
+RUN apk add --no-cache git make gcc g++ linux-headers musl-dev openssl-dev openssl-libs-static pkgconf tzdata
 
 WORKDIR /src
 
 RUN git clone --depth 1 --branch ${VERSION} https://github.com/redis/redis.git .
 
-RUN make -j "$(nproc)" \
-    BUILD_TLS=yes \
-    MALLOC=libc \
-    LDFLAGS="-static" \
-    CFLAGS="-static"
+RUN make -j "$(nproc)" BUILD_TLS=yes MALLOC=libc \
+    CFLAGS="-O3 -flto -fomit-frame-pointer -ffunction-sections -fdata-sections -march=native" \
+    LDFLAGS="-static -flto -Wl,--gc-sections"
 
 RUN mkdir -p /target-root/etc /target-root/data && \
     echo "redis:x:1000:1000:redis:/nonexistent:/sbin/nologin" > /target-root/etc/passwd && \
     echo "redis:x:1000:" > /target-root/etc/group && \
-    strip /src/src/redis-server && \
-    strip /src/src/redis-cli && \
+    strip -s /src/src/redis-server && \
+    strip -s /src/src/redis-cli && \
     cp /src/src/redis-server /target-root/ && \
     cp /src/src/redis-cli /target-root/ && \
     cp /src/redis.conf /target-root/etc/ && \
