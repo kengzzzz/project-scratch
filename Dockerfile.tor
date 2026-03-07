@@ -3,23 +3,18 @@ FROM rust:alpine AS builder
 ARG VERSION
 ENV OPENSSL_STATIC=1
 
-RUN apk add --no-cache \
-    build-base \
-    git \
-    pkgconfig \
-    openssl-dev \
-    openssl-libs-static \
-    sqlite-dev \
-    sqlite-static \
-    ca-certificates \
-    tzdata \
-    perl
+RUN apk add --no-cache build-base git pkgconfig openssl-dev openssl-libs-static sqlite-dev sqlite-static ca-certificates tzdata perl
 
 WORKDIR /src
 RUN git clone --depth 1 --branch ${VERSION} https://gitlab.torproject.org/tpo/core/arti.git .
 
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
     RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" \
+    CARGO_PROFILE_RELEASE_OPT_LEVEL="z" \
+    CARGO_PROFILE_RELEASE_LTO="true" \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" \
+    CARGO_PROFILE_RELEASE_PANIC="abort" \
+    CARGO_PROFILE_RELEASE_STRIP="true" \
     cargo build -p arti --release --locked \
     --no-default-features \
     --features "rpc,onion-service-client,onion-service-service,native-tls,tokio,static,dns-proxy,compression" \
@@ -71,9 +66,7 @@ int main() {
 }
 EOF
 
-RUN gcc -Os -static -march=native -o healthcheck healthcheck.c && \
-    strip healthcheck && \
-    strip target/release/arti
+RUN gcc -Os -static -march=native -o healthcheck healthcheck.c && strip -s healthcheck
 
 RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/tmp /rootfs/data /rootfs/usr/share && \
     chmod 1777 /rootfs/tmp && \
@@ -102,4 +95,5 @@ ENV HOME=/data
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["/usr/bin/healthcheck"]
 
-ENTRYPOINT ["/usr/bin/arti", "proxy", "-c", "/data/arti.toml"]
+ENTRYPOINT ["/usr/bin/arti"]
+CMD ["proxy", "-c", "/data/arti.toml"]

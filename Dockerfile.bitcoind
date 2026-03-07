@@ -1,18 +1,16 @@
-FROM ubuntu:latest AS builder
+FROM debian:trixie-slim AS builder
 
 ARG VERSION
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libtool autotools-dev automake pkg-config bsdmainutils \
-    curl git python3 ca-certificates cmake ninja-build
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libtool autotools-dev automake pkg-config bsdmainutils curl git python3 ca-certificates cmake ninja-build
 
 WORKDIR /src
 RUN git clone --depth 1 --branch ${VERSION} https://github.com/bitcoin/bitcoin.git .
 
-RUN export HOST=$(uname -m)-linux-gnu && \
-    make -C depends NO_QT=1 NO_UPNP=1 NO_NATPMP=1 NO_ZMQ=1 NO_WALLET=1 -j$(nproc) HOST=$HOST && \
-    cmake -B build -G Ninja \
-          --toolchain /src/depends/$HOST/toolchain.cmake \
+RUN export HOST=$(uname -m)-linux-gnu && make -C depends NO_QT=1 NO_UPNP=1 NO_NATPMP=1 NO_ZMQ=1 NO_WALLET=1 -j$(nproc) HOST=$HOST && cmake -B build -G Ninja --toolchain /src/depends/$HOST/toolchain.cmake \
+          -DCMAKE_C_FLAGS="-Os -flto -ffunction-sections -fdata-sections -march=native" \
+          -DCMAKE_CXX_FLAGS="-Os -flto -ffunction-sections -fdata-sections -march=native" \
+          -DCMAKE_EXE_LINKER_FLAGS="-static -flto -Wl,--gc-sections" \
           -DCMAKE_BUILD_TYPE=Release \
           -DBUILD_DAEMON=ON \
           -DBUILD_GUI=OFF \
@@ -25,8 +23,7 @@ RUN export HOST=$(uname -m)-linux-gnu && \
           -DENABLE_NATPMP=OFF \
           -DWITH_ZMQ=OFF \
           -DENABLE_EXTERNAL_SIGNER=OFF \
-          -DENABLE_STACKTRACES=OFF \
-          -DCMAKE_EXE_LINKER_FLAGS="-static" && \
+          -DENABLE_STACKTRACES=OFF && \
     cmake --build build --parallel $(nproc) && \
     mkdir -p /src/output && \
     cp build/bin/bitcoind build/bin/bitcoin-cli /src/output/
@@ -35,7 +32,7 @@ RUN mkdir -p /target-root/etc/ssl/certs /target-root/data /target-root/usr/bin &
     echo "bitcoind:x:1000:1000:bitcoind:/data:/bin/false" > /target-root/etc/passwd && \
     echo "bitcoind:x:1000:" > /target-root/etc/group && \
     cp /etc/ssl/certs/ca-certificates.crt /target-root/etc/ssl/certs/ && \
-    strip /src/output/bitcoind /src/output/bitcoin-cli && \
+    strip -s /src/output/bitcoind /src/output/bitcoin-cli && \
     cp /src/output/bitcoind /src/output/bitcoin-cli /target-root/usr/bin/ && \
     chown -R 1000:1000 /target-root/data
 
@@ -54,5 +51,4 @@ ENV BITCOIN_DATA=/data
 HEALTHCHECK --interval=60s --timeout=5s --start-period=15s --retries=3 CMD ["/usr/bin/bitcoin-cli", "-datadir=/data", "getblockchaininfo"]
 
 ENTRYPOINT ["/usr/bin/bitcoind"]
-
 CMD ["-datadir=/data", "-conf=/data/bitcoin.conf", "-printtoconsole"]

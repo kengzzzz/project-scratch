@@ -1,24 +1,8 @@
-FROM rust:trixie AS builder
+FROM rust:slim-trixie AS builder
 
 ARG VERSION
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    cmake \
-    git \
-    pkg-config \
-    libsnappy-dev \
-    libzstd-dev \
-    liblz4-dev \
-    zlib1g-dev \
-    libbz2-dev \
-    libssl-dev \
-    clang \
-    llvm-dev \
-    libclang-dev \
-    ca-certificates \
-    tzdata \
-    musl-tools
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake git pkg-config libsnappy-dev libzstd-dev liblz4-dev zlib1g-dev libbz2-dev libssl-dev clang llvm-dev libclang-dev ca-certificates tzdata musl-tools
 
 WORKDIR /build
 
@@ -28,8 +12,12 @@ RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
     RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" \
     CXXFLAGS="-w -fpermissive -include cstdint" \
     LIBROCKSDB_SYS_STATIC=1 \
-    cargo build --locked --release \
-    --target "$TARGET" && \
+    CARGO_PROFILE_RELEASE_OPT_LEVEL="z" \
+    CARGO_PROFILE_RELEASE_LTO="true" \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" \
+    CARGO_PROFILE_RELEASE_PANIC="abort" \
+    CARGO_PROFILE_RELEASE_STRIP="true" \
+    cargo build --locked --release --target "$TARGET" && \
     cp "target/$TARGET/release/electrs" target/release/electrs
 
 RUN cat <<EOF > healthcheck.c
@@ -62,9 +50,7 @@ int main(int argc, char* argv[]) {
 }
 EOF
 
-RUN musl-gcc -static -Os -o healthcheck healthcheck.c && \
-    strip healthcheck && \
-    strip target/release/electrs
+RUN musl-gcc -static -Os -o healthcheck healthcheck.c && strip -s healthcheck
 
 RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/tmp /rootfs/data /rootfs/usr/share && \
     chmod 1777 /rootfs/tmp && \
@@ -75,10 +61,11 @@ RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/tmp /rootfs/data /rootfs/usr/share &&
 
 FROM scratch
 
+COPY --from=builder /rootfs/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /rootfs/etc/passwd /etc/passwd
 COPY --from=builder /rootfs/etc/group /etc/group
-COPY --from=builder /rootfs/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder /rootfs/usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=builder /rootfs/usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
+
 COPY --from=builder /rootfs/tmp /tmp
 COPY --from=builder --chown=1000:1000 /rootfs/data /data
 
@@ -89,6 +76,9 @@ USER 1000:1000
 
 WORKDIR /data
 
+ENV TZ=Asia/Bangkok
+
 HEALTHCHECK --interval=60s --timeout=5s --start-period=15s --retries=3 CMD ["/usr/bin/healthcheck", "127.0.0.1", "50001"]
 
-ENTRYPOINT ["/usr/bin/electrs", "--conf=/data/config.toml"]
+ENTRYPOINT ["/usr/bin/electrs"]
+CMD ["--conf=/data/config.toml"]
