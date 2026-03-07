@@ -2,18 +2,9 @@ FROM rust:alpine AS builder
 
 ARG VW_VERSION
 ARG WV_VERSION
+ENV OPENSSL_STATIC=1
 
-RUN apk add --no-cache \
-    build-base \
-    git \
-    curl \
-    pkgconfig \
-    openssl-dev \
-    openssl-libs-static \
-    sqlite-dev \
-    sqlite-static \
-    ca-certificates \
-    tzdata
+RUN apk add --no-cache build-base git curl pkgconfig openssl-dev openssl-libs-static sqlite-dev sqlite-static ca-certificates tzdata
 
 WORKDIR /app
 
@@ -21,8 +12,7 @@ RUN mkdir -p web-vault \
     && curl -L "https://github.com/dani-garcia/bw_web_builds/releases/download/${WV_VERSION}/bw_web_${WV_VERSION}.tar.gz" \
     | tar xz -C web-vault --strip-components=1
 
-RUN find web-vault -name "*.map" -type f -delete && \
-    rm -rf web-vault/videos && \
+RUN find web-vault -name "*.map" -type f -delete && rm -rf web-vault/videos && \
     if [ -d "web-vault/locales" ]; then \
         find web-vault/locales -maxdepth 1 -type d ! -name "locales" ! -name "en" -exec rm -rf {} +; \
     fi
@@ -30,10 +20,13 @@ RUN find web-vault -name "*.map" -type f -delete && \
 WORKDIR /src
 RUN git clone --depth 1 --branch ${VW_VERSION} https://github.com/dani-garcia/vaultwarden.git .
 
-ENV OPENSSL_STATIC=1
-
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
     RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" \
+    CARGO_PROFILE_RELEASE_OPT_LEVEL="z" \
+    CARGO_PROFILE_RELEASE_LTO="true" \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" \
+    CARGO_PROFILE_RELEASE_PANIC="abort" \
+    CARGO_PROFILE_RELEASE_STRIP="true" \
     cargo build --features "sqlite" --release --target "$TARGET" && \
     cp "target/$TARGET/release/vaultwarden" target/release/vaultwarden
 
@@ -59,9 +52,7 @@ int main() {
 }
 EOF
 
-RUN gcc -Os -static -march=native -o healthcheck healthcheck.c && \
-    strip healthcheck && \
-    strip target/release/vaultwarden
+RUN gcc -Os -static -march=native -o healthcheck healthcheck.c && strip -s healthcheck
 
 RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/tmp /rootfs/data /rootfs/usr/share && \
     chmod 1777 /rootfs/tmp && \
