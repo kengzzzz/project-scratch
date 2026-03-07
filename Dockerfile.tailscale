@@ -63,7 +63,5 @@ ENV TZ=Asia/Bangkok
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 CMD  ["/app/tailscale", "--socket=/tmp/tailscaled.sock", "status"]
 
-ENTRYPOINT ["/app/tailscaled", \
-    "--state=/var/lib/tailscale/tailscaled.state", \
-    "--socket=/tmp/tailscaled.sock", \
-    "--socks5-server=localhost:1055"]
+ENTRYPOINT ["/app/tailscaled"]
+CMD ["--state=/var/lib/tailscale/tailscaled.state", "--socket=/tmp/tailscaled.sock", "--socks5-server=localhost:1055"]

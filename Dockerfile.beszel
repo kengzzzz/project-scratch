@@ -47,4 +47,5 @@ ENV TZ=Asia/Bangkok
 
 HEALTHCHECK --interval=120s --timeout=10s --start-period=10s --retries=3 CMD ["/hub", "health", "--url", "http://127.0.0.1:8090"]
 
-ENTRYPOINT ["/hub", "serve", "--http", "0.0.0.0:8090"]
+ENTRYPOINT ["/hub"]
+CMD ["serve", "--http", "0.0.0.0:8090"]
