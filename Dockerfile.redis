@@ -2,39 +2,34 @@ FROM alpine:latest AS builder
 
 ARG VERSION
 
-RUN apk add --no-cache git make gcc g++ linux-headers musl-dev openssl-dev openssl-libs-static jemalloc-dev pkgconf tzdata
+RUN apk add --no-cache git make gcc g++ linux-headers musl-dev tzdata
 
-WORKDIR /src
+WORKDIR /build
 
 RUN git clone --depth 1 --branch ${VERSION} https://github.com/redis/redis.git .
 
-RUN make -j "$(nproc)" BUILD_TLS=yes MALLOC=jemalloc \
-    CFLAGS="-O3 -flto=auto -ffunction-sections -fdata-sections -march=native" \
-    LDFLAGS="-static -flto=auto -Wl,--gc-sections"
+RUN make -j "$(nproc)" BUILD_TLS=no \
+    CFLAGS="-ffunction-sections -fdata-sections -march=native -D_FORTIFY_SOURCE=2" \
+    LDFLAGS="-static -march=native -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now"
 
-RUN mkdir -p /target-root/etc /target-root/data && \
-    echo "redis:x:1000:1000:redis:/nonexistent:/sbin/nologin" > /target-root/etc/passwd && \
-    echo "redis:x:1000:" > /target-root/etc/group && \
-    strip -s /src/src/redis-server && \
-    strip -s /src/src/redis-cli && \
-    cp /src/src/redis-server /target-root/ && \
-    cp /src/src/redis-cli /target-root/ && \
-    cp /src/redis.conf /target-root/etc/ && \
-    chown -R 1000:1000 /target-root/data
+RUN mkdir -p /rootfs/etc /rootfs/bin /rootfs/usr/share/zoneinfo/Asia /data && \
+    echo "redis:x:1000:1000:redis:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && \
+    echo "redis:x:1000:" > /rootfs/etc/group && \
+    strip -s /build/src/redis-server /build/src/redis-cli && \
+    cp /build/src/redis-server /rootfs/bin/ && \
+    cp /build/src/redis-cli /rootfs/bin/ && \
+    cp /build/redis.conf /rootfs/etc/ && \
+    cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok
 
-RUN sed -i 's/^bind.*/bind 0.0.0.0/' /target-root/etc/redis.conf && \
-    sed -i 's/^protected-mode yes/protected-mode no/' /target-root/etc/redis.conf && \
-    sed -i 's/^dir .*/dir \/data/' /target-root/etc/redis.conf
+RUN sed -i 's/^bind.*/bind 0.0.0.0/' /rootfs/etc/redis.conf && \
+    sed -i 's/^protected-mode yes/protected-mode no/' /rootfs/etc/redis.conf && \
+    sed -i 's/^dir .*/dir \/data/' /rootfs/etc/redis.conf
 
 FROM scratch
 
-COPY --from=builder /target-root/etc/passwd /etc/passwd
-COPY --from=builder /target-root/etc/group /etc/group
-COPY --from=builder /target-root/etc/redis.conf /etc/redis.conf
-COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
-COPY --from=builder --chown=1000:1000 /target-root/data /data
-COPY --from=builder /target-root/redis-server /redis-server
-COPY --from=builder /target-root/redis-cli /redis-cli
+COPY --from=builder /rootfs /
+
+COPY --from=builder --chown=1000:1000 /data /data
 
 USER 1000:1000
 
@@ -42,7 +37,7 @@ WORKDIR /data
 
 ENV TZ=Asia/Bangkok
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/redis-cli", "ping"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/bin/redis-cli", "ping"]
 
-ENTRYPOINT ["/redis-server"]
+ENTRYPOINT ["/bin/redis-server"]
 CMD ["/etc/redis.conf"]
