@@ -28,7 +28,7 @@ RUN ./auto/configure \
     --with-stream_ssl_module \
     --with-pcre-jit \
     --with-cc-opt="-static -O3 -flto=auto -ffunction-sections -fdata-sections -march=native -fno-semantic-interposition -falign-functions=32 -D_FORTIFY_SOURCE=2" \
-    --with-ld-opt="-static -O3 -flto=auto -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now" \
+    --with-ld-opt="-static -O3 -flto=auto -march=native -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now" \
     --without-http_gzip_module \
     --without-http_charset_module \
     --without-http_ssi_module \
@@ -69,13 +69,14 @@ RUN ./auto/configure \
     --without-stream_upstream_random_module \
     --without-stream_upstream_zone_module \
     && make -j$(nproc) \
-    && make DESTDIR=/target-root install
+    && make DESTDIR=/rootfs install
 
-RUN strip -s /target-root/usr/sbin/nginx && setcap 'cap_net_bind_service=+ep' /target-root/usr/sbin/nginx
+RUN mkdir -p /rootfs/etc /rootfs/usr/bin /rootfs/usr/share/zoneinfo/Asia /rootfs-writable/tmp /rootfs-writable/var/log/nginx && \
+    echo "nginx:x:1000:1000:nginx:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && \
+    echo "nginx:x:1000:" > /rootfs/etc/group && \
+    cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok
 
-RUN mkdir -p /target-root/etc /target-root/tmp /target-root/var/log/nginx /target-root/usr/bin && \
-    echo "nginx:x:1000:1000:nginx:/nonexistent:/sbin/nologin" > /target-root/etc/passwd && \
-    echo "nginx:x:1000:" > /target-root/etc/group
+RUN strip -s /rootfs/usr/sbin/nginx && setcap 'cap_net_bind_service=+ep' /rootfs/usr/sbin/nginx
 
 RUN cat <<'EOF' > healthcheck.c
 #include <stdio.h>
@@ -126,15 +127,13 @@ int main() {
 }
 EOF
 
-RUN gcc -static -Os -s -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -o /target-root/usr/bin/healthcheck healthcheck.c
+RUN gcc -static -Os -s -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -o /rootfs/usr/bin/healthcheck healthcheck.c
 
 FROM scratch
 
-COPY --from=builder /target-root/etc /etc
-COPY --from=builder /target-root/usr /usr
-COPY --from=builder --chown=1000:1000 /target-root/tmp /tmp
-COPY --from=builder --chown=1000:1000 /target-root/var /var
-COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
+COPY --from=builder /rootfs /
+
+COPY --from=builder --chown=1000:1000 /rootfs-writable /
 
 USER 1000:1000
 
