@@ -1,12 +1,13 @@
-FROM alpine:latest AS builder
+FROM alpine@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 AS builder
 
-ARG VERSION
+ARG VERSION COMMIT_HASH
 
 RUN apk add --no-cache git make gcc g++ bison flex linux-headers musl-dev openssl-dev openssl-libs-static expat-dev expat-static hiredis-dev zlib-static pkgconfig tzdata ca-certificates curl
 
 WORKDIR /src
 
-RUN git clone --depth 1 --branch ${VERSION} https://github.com/NLnetLabs/unbound.git .
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/NLnetLabs/unbound.git . && \
+    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
 
 RUN ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-static-exe --enable-cachedb --with-libhiredis --with-pthreads --enable-tfo-client \
     CFLAGS="-O3 -flto=auto -no-pie -march=native -ffunction-sections -fdata-sections"

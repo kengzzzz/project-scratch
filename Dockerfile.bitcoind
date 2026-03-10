@@ -1,11 +1,12 @@
-FROM alpine:latest AS builder
+FROM alpine@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 AS builder
 
-ARG VERSION
+ARG VERSION COMMIT_HASH
 
 RUN apk add --no-cache build-base libtool autoconf automake pkgconf curl git python3 cmake ninja bash patch linux-headers coreutils ca-certificates
 
 WORKDIR /src
-RUN git clone --depth 1 --branch ${VERSION} https://github.com/bitcoin/bitcoin.git .
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/bitcoin/bitcoin.git . && \
+    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
 
 RUN export HOST=$(uname -m)-linux-musl && \
     make -C depends HOST=$HOST CC=gcc CXX=g++ AR=ar RANLIB=ranlib STRIP=strip NO_QT=1 NO_UPNP=1 NO_NATPMP=1 NO_ZMQ=1 NO_WALLET=1 -j$(nproc) && \

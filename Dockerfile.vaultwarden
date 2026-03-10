@@ -1,6 +1,6 @@
-FROM rust:alpine AS builder
+FROM rust:alpine@sha256:ef7b340d4201444fa2757dfddfd4c03be9d2bde468de7b7a68b0e9fabb794334 AS builder
 
-ARG VW_VERSION WV_VERSION
+ARG VW_VERSION WV_VERSION COMMIT_HASH
 ENV OPENSSL_STATIC=1 RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" CARGO_PROFILE_RELEASE_OPT_LEVEL="3" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" CARGO_PROFILE_RELEASE_LTO="fat" CARGO_PROFILE_RELEASE_PANIC="abort" CARGO_PROFILE_RELEASE_STRIP="true"
 
 RUN apk add --no-cache build-base git curl pkgconfig openssl-dev openssl-libs-static sqlite-dev sqlite-static ca-certificates tzdata
@@ -11,8 +11,11 @@ RUN mkdir -p web-vault && \
     find web-vault -name "*.map" -type f -delete && find web-vault -name "*.txt" -type f -delete && rm -rf web-vault/videos && \
     if [ -d "web-vault/locales" ]; then find web-vault/locales -maxdepth 1 -type d ! -name "locales" ! -name "en" -exec rm -rf {} +; fi
 
+RUN find /app/web-vault -type d -exec chmod 755 {} + && find /app/web-vault -type f -exec chmod 644 {} +
+
 WORKDIR /src
-RUN git clone --depth 1 --branch ${VW_VERSION} https://github.com/dani-garcia/vaultwarden.git .
+RUN git clone --depth 1 --branch ${VW_VERSION} https://github.com/dani-garcia/vaultwarden.git . && \
+    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
 
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
     cargo build --features "sqlite,enable_mimalloc" --release --locked --target "$TARGET" && \

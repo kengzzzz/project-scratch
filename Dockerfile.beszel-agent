@@ -1,23 +1,19 @@
-FROM golang:alpine AS builder
+FROM golang:alpine@sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e AS builder
 
-ARG VERSION
+ARG VERSION COMMIT_HASH
 
 RUN apk add --no-cache ca-certificates git tzdata
 
 WORKDIR /build
 
-RUN git clone --depth 1 --branch ${VERSION} https://github.com/henrygd/beszel.git .
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/henrygd/beszel.git . && \
+    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
 
 WORKDIR /build/internal/cmd/agent
 
-RUN CGO_ENABLED=0 go build \
-    -trimpath \
-    -ldflags="-w -s" \
-    -o /build/beszel-agent \
-    ./agent.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-w -s" -o /build/beszel-agent ./agent.go
 
-RUN echo "beszel:x:1000:1000:beszel:/tmp:/sbin/nologin" > /etc/passwd.custom && \
-    echo "beszel:x:1000:" > /etc/group.custom
+RUN echo "beszel:x:1000:1000:beszel:/tmp:/sbin/nologin" > /etc/passwd.custom && echo "beszel:x:1000:" > /etc/group.custom
 
 FROM scratch
 

@@ -1,6 +1,6 @@
-FROM golang:alpine AS builder
+FROM golang:alpine@sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e AS builder
 
-ARG VERSION
+ARG VERSION COMMIT_HASH
 
 RUN apk add --no-cache ca-certificates curl git unzip libstdc++ gcompat bash build-base gcc musl-dev tzdata
 
@@ -8,7 +8,8 @@ RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
 
 WORKDIR /build
-RUN git clone --depth 1 --branch ${VERSION} https://github.com/usememos/memos.git .
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/usememos/memos.git . && \
+    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
 
 WORKDIR /build/web
 RUN bun install && bun run build

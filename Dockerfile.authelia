@@ -1,6 +1,6 @@
-FROM golang:alpine AS builder
+FROM golang:alpine@sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e AS builder
 
-ARG VERSION
+ARG VERSION COMMIT_HASH
 
 RUN apk add --no-cache git build-base tzdata ca-certificates nodejs npm
 
@@ -8,7 +8,8 @@ RUN npm install -g pnpm
 
 WORKDIR /build
 
-RUN git clone --depth 1 --branch ${VERSION} https://github.com/authelia/authelia.git .
+RUN git clone --depth 1 --branch ${VERSION} https://github.com/authelia/authelia.git . && \
+    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
 
 RUN cd web && \
     pnpm install && \

@@ -1,12 +1,13 @@
-FROM rust:alpine AS builder
+FROM rust:alpine@sha256:ef7b340d4201444fa2757dfddfd4c03be9d2bde468de7b7a68b0e9fabb794334 AS builder
 
-ARG VERSION
+ARG VERSION COMMIT_HASH
 ENV RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" CARGO_PROFILE_RELEASE_OPT_LEVEL="3" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" CARGO_PROFILE_RELEASE_LTO="fat" CARGO_PROFILE_RELEASE_PANIC="abort" CARGO_PROFILE_RELEASE_STRIP="true"
 
 RUN apk add --no-cache build-base git sqlite-dev sqlite-static ca-certificates tzdata
 
 WORKDIR /src
-RUN git clone --depth 1 --branch ${VERSION} https://gitlab.torproject.org/tpo/core/arti.git .
+RUN git clone --depth 1 --branch ${VERSION} https://gitlab.torproject.org/tpo/core/arti.git . && \
+    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
 
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && cargo build -p arti --release --locked \
     --no-default-features --features "rustls,tokio,static-sqlite,dns-proxy,compression,onion-service-client,onion-service-service" \
