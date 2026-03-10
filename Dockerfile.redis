@@ -8,18 +8,12 @@ WORKDIR /build
 
 RUN git clone --depth 1 --branch ${VERSION} https://github.com/redis/redis.git .
 
-RUN make -j "$(nproc)" BUILD_TLS=no \
-    CFLAGS="-ffunction-sections -fdata-sections -march=native -D_FORTIFY_SOURCE=2" \
-    LDFLAGS="-static -march=native -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now"
+RUN make -j "$(nproc)" BUILD_TLS=no CFLAGS="-ffunction-sections -fdata-sections -march=native" LDFLAGS="-static -Wl,--gc-sections"
 
 RUN mkdir -p /rootfs/etc /rootfs/bin /rootfs/usr/share/zoneinfo/Asia /data && \
-    echo "redis:x:1000:1000:redis:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && \
-    echo "redis:x:1000:" > /rootfs/etc/group && \
+    echo "redis:x:1000:1000:redis:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && echo "redis:x:1000:" > /rootfs/etc/group && \
     strip -s /build/src/redis-server /build/src/redis-cli && \
-    cp /build/src/redis-server /rootfs/bin/ && \
-    cp /build/src/redis-cli /rootfs/bin/ && \
-    cp /build/redis.conf /rootfs/etc/ && \
-    cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok
+    cp /build/src/redis-server /rootfs/bin/ && cp /build/src/redis-cli /rootfs/bin/ && cp /build/redis.conf /rootfs/etc/ && cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok
 
 RUN sed -i 's/^bind.*/bind 0.0.0.0/' /rootfs/etc/redis.conf && \
     sed -i 's/^protected-mode yes/protected-mode no/' /rootfs/etc/redis.conf && \

@@ -27,8 +27,8 @@ RUN ./auto/configure \
     --with-stream \
     --with-stream_ssl_module \
     --with-pcre-jit \
-    --with-cc-opt="-static -O3 -flto=auto -ffunction-sections -fdata-sections -march=native -fno-semantic-interposition -falign-functions=32 -D_FORTIFY_SOURCE=2" \
-    --with-ld-opt="-static -O3 -flto=auto -march=native -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now" \
+    --with-cc-opt="-O3 -flto=auto -ffunction-sections -fdata-sections -march=native" \
+    --with-ld-opt="-static -Wl,--gc-sections" \
     --without-http_gzip_module \
     --without-http_charset_module \
     --without-http_ssi_module \
@@ -72,8 +72,7 @@ RUN ./auto/configure \
     && make DESTDIR=/rootfs install
 
 RUN mkdir -p /rootfs/etc /rootfs/usr/bin /rootfs/usr/share/zoneinfo/Asia /rootfs-writable/tmp /rootfs-writable/var/log/nginx && \
-    echo "nginx:x:1000:1000:nginx:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && \
-    echo "nginx:x:1000:" > /rootfs/etc/group && \
+    echo "nginx:x:1000:1000:nginx:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && echo "nginx:x:1000:" > /rootfs/etc/group && \
     cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok
 
 RUN strip -s /rootfs/usr/sbin/nginx && setcap 'cap_net_bind_service=+ep' /rootfs/usr/sbin/nginx
