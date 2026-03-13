@@ -1,32 +1,54 @@
-FROM rust:alpine@sha256:ef7b340d4201444fa2757dfddfd4c03be9d2bde468de7b7a68b0e9fabb794334 AS builder
+FROM debian:trixie-slim@sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430 AS verifier
 
-ARG VW_VERSION WV_VERSION COMMIT_HASH
+ARG VW_VERSION VW_COMMIT_HASH WV_VERSION WV_SHA256
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl git ca-certificates coreutils && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /verify
+
+RUN set -ex; \
+    curl -sLO "https://github.com/dani-garcia/bw_web_builds/releases/download/${WV_VERSION}/bw_web_${WV_VERSION}.tar.gz"; \
+    echo "${WV_SHA256}  bw_web_${WV_VERSION}.tar.gz" | sha256sum -c -; \
+    mkdir -p /verified-web; \
+    tar -xzf "bw_web_${WV_VERSION}.tar.gz" -C /verified-web --strip-components=1; \
+    mkdir -p /verified-src; \
+    git clone --depth 1 --branch ${VW_VERSION} https://github.com/dani-garcia/vaultwarden.git /verified-src; \
+    cd /verified-src; \
+    [ "$(git rev-parse HEAD)" = "$VW_COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+
+FROM rust:alpine@sha256:ef7b340d4201444fa2757dfddfd4c03be9d2bde468de7b7a68b0e9fabb794334 AS base
+
+RUN apk add --no-cache build-base git pkgconfig openssl-dev openssl-libs-static sqlite-dev sqlite-static ca-certificates tzdata
+
+FROM base AS frontend
+
+WORKDIR /web-vault
+
+COPY --from=verifier /verified-web .
+
+RUN find . -name "*.map" -type f -delete && find . -name "*.txt" -type f -delete && rm -rf videos && \
+    if [ -d "locales" ]; then find locales -maxdepth 1 -type d ! -name "locales" ! -name "en" -exec rm -rf {} +; fi && \
+    find . -type d -exec chmod 755 {} + && find . -type f -exec chmod 444 {} +
+
+FROM base AS backend
+
 ENV OPENSSL_STATIC=1 RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" CARGO_PROFILE_RELEASE_OPT_LEVEL="3" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" CARGO_PROFILE_RELEASE_LTO="fat" CARGO_PROFILE_RELEASE_PANIC="abort" CARGO_PROFILE_RELEASE_STRIP="true"
 
-RUN apk add --no-cache build-base git curl pkgconfig openssl-dev openssl-libs-static sqlite-dev sqlite-static ca-certificates tzdata
-
-WORKDIR /app
-RUN mkdir -p web-vault && \
-    curl -L "https://github.com/dani-garcia/bw_web_builds/releases/download/${WV_VERSION}/bw_web_${WV_VERSION}.tar.gz" | tar xz -C web-vault --strip-components=1 && \
-    find web-vault -name "*.map" -type f -delete && find web-vault -name "*.txt" -type f -delete && rm -rf web-vault/videos && \
-    if [ -d "web-vault/locales" ]; then find web-vault/locales -maxdepth 1 -type d ! -name "locales" ! -name "en" -exec rm -rf {} +; fi
-
-RUN find /app/web-vault -type d -exec chmod 755 {} + && find /app/web-vault -type f -exec chmod 644 {} +
-
 WORKDIR /src
-RUN git clone --depth 1 --branch ${VW_VERSION} https://github.com/dani-garcia/vaultwarden.git . && \
-    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+
+COPY --from=verifier /verified-src .
 
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
     cargo build --features "sqlite,enable_mimalloc" --release --locked --target "$TARGET" && \
-    cp "target/$TARGET/release/vaultwarden" target/release/vaultwarden
+    cp "target/$TARGET/release/vaultwarden" /vaultwarden
 
-RUN cat <<'EOF' > healthcheck.c
+FROM base AS utils
+
+COPY <<'EOF' healthcheck.c
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <stdlib.h>
-
 int main() {
     char *port_env = getenv("ROCKET_PORT");
     int port = port_env ? atoi(port_env) : 80;
@@ -36,26 +58,33 @@ int main() {
     a.sin_family = AF_INET;
     a.sin_port = htons(port);
     a.sin_addr.s_addr = inet_addr("127.0.0.1");
-
     int r = connect(s, (struct sockaddr *)&a, sizeof(a));
     close(s);
     return (r == 0) ? 0 : 1;
 }
 EOF
 
-RUN gcc -static -Os -s -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -o healthcheck healthcheck.c
+RUN gcc -static -Os -s -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -o /healthcheck healthcheck.c
 
-RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/usr/bin /rootfs/usr/share/zoneinfo/Asia /rootfs-writable/data /rootfs-writable/tmp /rootfs-writable/web-vault && \
-    echo "vaultwarden:x:1000:1000:vaultwarden:/var/empty:/sbin/nologin" > /rootfs/etc/passwd && echo "vaultwarden:x:1000:" > /rootfs/etc/group && \
-    cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && cp target/release/vaultwarden /rootfs/usr/bin/ && \
-    cp healthcheck /rootfs/usr/bin/ && cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok && \
-    cp -r /app/web-vault/* /rootfs-writable/web-vault/ && chmod 1777 /rootfs-writable/tmp
+RUN echo "vaultwarden:x:1000:1000:vaultwarden:/var/empty:/sbin/nologin" > /passwd.custom && echo "vaultwarden:x:1000:" > /group.custom
+
+FROM base AS exporter
+
+RUN mkdir -p /rootfs/usr/bin /rootfs/web-vault /rootfs/etc/ssl/certs /rootfs/data /rootfs/tmp
+
+COPY --from=utils /passwd.custom /rootfs/etc/passwd
+COPY --from=utils /group.custom /rootfs/etc/group
+COPY --from=base /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/
+COPY --from=base /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok
+COPY --from=backend /vaultwarden /rootfs/usr/bin/vaultwarden
+COPY --from=utils /healthcheck /rootfs/usr/bin/healthcheck
+COPY --from=frontend /web-vault /rootfs/web-vault
+
+RUN chmod 1777 /rootfs/tmp && chown -R 1000:1000 /rootfs/data /rootfs/tmp
 
 FROM scratch
 
-COPY --from=builder /rootfs/ /
-
-COPY --from=builder --chown=1000:1000 /rootfs-writable/ /
+COPY --from=exporter /rootfs/ /
 
 USER 1000:1000
 
