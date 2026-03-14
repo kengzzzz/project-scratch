@@ -24,15 +24,15 @@ RUN set -ex; \
 
 FROM alpine@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 AS builder
 
-RUN apk add --no-cache build-base libtool autoconf automake pkgconf curl git python3 cmake ninja bash patch linux-headers coreutils ca-certificates
+RUN apk add --no-cache build-base libtool autoconf automake pkgconf curl python3 cmake ninja bash patch linux-headers ca-certificates
 
 WORKDIR /src
 
 COPY --from=verifier /verified-src/ /src/
 
-RUN export HOST=$(uname -m)-linux-musl && \
-    make -C depends HOST=$HOST NO_QT=1 NO_ZMQ=1 NO_WALLET=1 NO_USDT=1 NO_IPC=1 -j$(nproc) && \
-    cmake -B build -G Ninja --toolchain /src/depends/$HOST/toolchain.cmake \
+RUN export HOST=$(uname -m)-linux-musl && make -C depends HOST=$HOST NO_QT=1 NO_ZMQ=1 NO_WALLET=1 NO_USDT=1 NO_IPC=1 -j$(nproc)
+
+RUN export HOST=$(uname -m)-linux-musl && cmake -B build -G Ninja --toolchain /src/depends/$HOST/toolchain.cmake \
     -DAPPEND_CFLAGS="-ffunction-sections -fdata-sections -march=native" \
     -DAPPEND_CXXFLAGS="-ffunction-sections -fdata-sections -march=native" \
     -DAPPEND_LDFLAGS="-static -Wl,--gc-sections" \
@@ -55,8 +55,9 @@ RUN export HOST=$(uname -m)-linux-musl && \
     -DWERROR=OFF \
     -DWITH_CCACHE=OFF \
     -DWITH_USDT=OFF \
-    -DWITH_ZMQ=OFF && \
-    cmake --build build --parallel $(nproc)
+    -DWITH_ZMQ=OFF
+
+RUN cmake --build build --parallel $(nproc)
 
 RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/usr/bin /rootfs-writable/data /rootfs-writable/tmp && \
     echo "bitcoind:x:1000:1000:bitcoind:/data:/sbin/nologin" > /rootfs/etc/passwd && echo "bitcoind:x:1000:" > /rootfs/etc/group && \
@@ -64,11 +65,15 @@ RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/usr/bin /rootfs-writable/data /rootfs
     cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && cp build/bin/bitcoind build/bin/bitcoin-cli /rootfs/usr/bin/ && \
     chmod 1777 /rootfs-writable/tmp
 
-FROM scratch
+FROM scratch AS exporter
 
 COPY --from=builder /rootfs/ /
 
 COPY --from=builder --chown=1000:1000 /rootfs-writable/ /
+
+FROM scratch
+
+COPY --from=exporter / /
 
 USER 1000:1000
 
