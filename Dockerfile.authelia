@@ -1,142 +1,165 @@
-FROM golang:alpine@sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e AS builder
+ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+ARG GOLANG_DIGEST=sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e
 
-ARG VERSION COMMIT_HASH
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM golang:alpine@${GOLANG_DIGEST} AS golang-base
 
-RUN apk add --no-cache git build-base tzdata ca-certificates nodejs npm
+FROM alpine-base AS verifier
 
-RUN npm install -g pnpm
+ARG COMMIT_HASH
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /verify
+
+RUN git init . && \
+    git remote add origin https://github.com/authelia/authelia.git && \
+    git fetch --depth 1 origin "${COMMIT_HASH}" && \
+    git checkout FETCH_HEAD
+
+FROM alpine-base AS frontend
+
+RUN apk add --no-cache git nodejs npm && npm install -g pnpm
 
 WORKDIR /build
 
-RUN git clone --depth 1 --branch ${VERSION} https://github.com/authelia/authelia.git . && \
-    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+COPY --from=verifier /verify/ ./
 
-RUN cd web && \
-    pnpm install && \
-    pnpm build && \
-    cd .. && \
-    mkdir -p internal/server/public_html/api && \
+RUN cd web && pnpm install --frozen-lockfile &&\
+    pnpm build && cd .. && mkdir -p internal/server/public_html/api && \
     cp -r api/* internal/server/public_html/api/
 
-RUN CGO_ENABLED=1 go build \
-    -tags netgo,osusergo,sqlite_omit_load_extension \
-    -ldflags '-linkmode external -extldflags "-static" -s -w' \
-    -trimpath -buildmode=pie \
-    -o authelia \
-    ./cmd/authelia
+FROM golang-base AS utils
 
-RUN cat <<EOF > healthcheck.c
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <sys/select.h>
-#include <sys/time.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
+WORKDIR /build
 
-int check_connection(int domain, const char* ip, int port) {
-    int s = socket(domain, SOCK_STREAM, 0);
-    if (s < 0) return -1;
-
-    fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
-
-    struct sockaddr_storage addr;
-    memset(&addr, 0, sizeof(addr));
-
-    if (domain == AF_INET) {
-        struct sockaddr_in *a = (struct sockaddr_in *)&addr;
-        a->sin_family = AF_INET;
-        a->sin_port = htons(port);
-        inet_pton(AF_INET, ip, &a->sin_addr);
-    } else {
-        struct sockaddr_in6 *a = (struct sockaddr_in6 *)&addr;
-        a->sin6_family = AF_INET6;
-        a->sin6_port = htons(port);
-        inet_pton(AF_INET6, ip, &a->sin6_addr);
+COPY <<EOF healthcheck.go
+package main
+import (
+    "bufio"
+    "crypto/tls"
+    "fmt"
+    "net/http"
+    "os"
+    "strconv"
+    "strings"
+    "time"
+)
+func discoverPort(filepath string) int {
+    file, err := os.Open(filepath)
+    if err != nil {
+        return 0
     }
-
-    int len = (domain == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
-    int r = connect(s, (struct sockaddr *)&addr, len);
-
-    if (r < 0 && errno == EINPROGRESS) {
-        fd_set master;
-        FD_ZERO(&master);
-        FD_SET(s, &master);
-        struct timeval timeout = { .tv_sec = 2, .tv_usec = 0 };
-        r = select(s + 1, NULL, &master, NULL, &timeout);
-        if (r > 0) {
-            int err; socklen_t l = sizeof(err);
-            getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &l);
-            r = (err == 0) ? 0 : -1;
-        } else r = -1;
-    }
-    close(s);
-    return r;
-}
-
-int discover_port(const char* file) {
-    FILE *fp = fopen(file, "r");
-    if (!fp) return 0;
-    char line[256];
-    while (fgets(line, sizeof(line), fp)) {
-        char local_addr[64];
-        unsigned int state;
-        if (sscanf(line, "%*d: %63s %*s %x", local_addr, &state) == 2) {
-            if (state == 0x0A) { 
-                char *colon = strchr(local_addr, ':');
-                if (colon) {
-                    int port = 0;
-                    sscanf(colon + 1, "%x", &port);
-                    fclose(fp);
-                    return port;
+    defer file.Close()
+    scanner := bufio.NewScanner(file)
+    for scanner.Scan() {
+        fields := strings.Fields(scanner.Text())
+        if len(fields) >= 4 && fields[3] == "0A" {
+            parts := strings.Split(fields[1], ":")
+            if len(parts) == 2 {
+                portHex := parts[1]
+                port, err := strconv.ParseInt(portHex, 16, 32)
+                if err == nil {
+                    return int(port)
                 }
             }
         }
     }
-    fclose(fp);
-    return 0;
+    return 0
 }
-
-int main() {
-    int port = discover_port("/proc/net/tcp6");
-    if (port == 0) port = discover_port("/proc/net/tcp");
-    if (port == 0) port = 9091;
-
-    if (check_connection(AF_INET6, "::1", port) == 0) return 0;
-
-    if (check_connection(AF_INET, "127.0.0.1", port) == 0) return 0;
-
-    return 1;
+func checkHealth(scheme string, port int) bool {
+    url := fmt.Sprintf("%s://127.0.0.1:%d/api/health", scheme, port)
+    client := &http.Client{
+        Timeout: 5 * time.Second,
+        Transport: &http.Transport{
+            TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+        },
+    }
+    resp, err := client.Get(url)
+    if err == nil && resp.StatusCode == http.StatusOK {
+        return true
+    }
+    return false
+}
+func main() {
+    port := discoverPort("/proc/net/tcp6")
+    if port == 0 {
+        port = discoverPort("/proc/net/tcp")
+    }
+    if port == 0 {
+        port = 9091
+    }
+    if checkHealth("http", port) {
+        os.Exit(0)
+    }
+    if checkHealth("https", port) {
+        os.Exit(0)
+    }
+    os.Exit(1)
 }
 EOF
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o /healthcheck healthcheck.go
 
-RUN gcc -static -Os -march=native -o healthcheck healthcheck.c && \
-    strip healthcheck
+FROM golang-base AS backend
 
-RUN echo "authelia:x:1000:1000:authelia:/app:/sbin/nologin" > /etc/passwd.custom && \
-    echo "authelia:x:1000:" > /etc/group.custom
+ARG VERSION COMMIT_HASH
+
+RUN apk add --no-cache git build-base fortify-headers sqlite-dev
+
+WORKDIR /build
+
+COPY --from=verifier /verify/ ./
+
+RUN go mod download
+
+COPY --from=frontend /build/internal/server/public_html/ ./internal/server/public_html/
+
+ENV CGO_CFLAGS="-O3 -flto=auto -march=native" \
+    CGO_CPPFLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3" \
+    X_UTILS='github.com/authelia/authelia/v4/internal/utils' \
+    CGO_ENABLED=1
+
+RUN BUILD_DATE=$(date -u +%a,\ %d\ %b\ %Y\ %H:%M:%S\ %Z) && \
+    LDFLAGS="-linkmode external -extldflags '-static' -s -w \
+        -X '${X_UTILS}.BuildTag=${VERSION}' \
+        -X '${X_UTILS}.BuildState=tagged clean' \
+        -X '${X_UTILS}.BuildDate=${BUILD_DATE}' \
+        -X '${X_UTILS}.BuildCommit=${COMMIT_HASH}' \
+        -X '${X_UTILS}.BuildBranch=master'" && \
+    go build \
+    -tags netgo,osusergo,sqlite_omit_load_extension \
+    -ldflags "${LDFLAGS}" \
+    -trimpath -buildmode=pie -o /authelia ./cmd/authelia
+
+FROM alpine-base AS exporter
+
+RUN apk add --no-cache tzdata ca-certificates
+
+WORKDIR /rootfs
+
+RUN mkdir -p etc/ssl/certs usr/share/zoneinfo/Asia usr/local/bin var/lib/authelia
+
+RUN cp /etc/ssl/certs/ca-certificates.crt etc/ssl/certs/ && cp /usr/share/zoneinfo/Asia/Bangkok usr/share/zoneinfo/Asia/Bangkok
+    
+RUN echo "authelia:x:1000:1000:authelia:/var/lib/authelia:/sbin/nologin" > etc/passwd && echo "authelia:x:1000:" > etc/group
+
+COPY --from=backend /authelia usr/local/bin/authelia
+
+COPY --from=utils /healthcheck usr/local/bin/healthcheck
+
+RUN chown 1000:1000 var/lib/authelia
 
 FROM scratch
 
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
-COPY --from=builder /etc/passwd.custom /etc/passwd
-COPY --from=builder /etc/group.custom /etc/group
+COPY --from=exporter /rootfs/ /
 
-WORKDIR /app
-
-COPY --from=builder /build/authelia /app/authelia
-COPY --from=builder /build/healthcheck /app/healthcheck
+WORKDIR /var/lib/authelia
 
 USER 1000:1000
 
 ENV TZ=Asia/Bangkok
 ENV X_AUTHELIA_CONFIG_FILTERS=template
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/app/healthcheck"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["healthcheck"]
 
-ENTRYPOINT ["/app/authelia"]
+ENTRYPOINT ["authelia"]
