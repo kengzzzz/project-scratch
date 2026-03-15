@@ -1,59 +1,96 @@
-FROM golang:alpine@sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e AS rclone-builder
+ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+ARG GOLANG_DIGEST=sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e
+ARG NIX_DIGEST=sha256:1d59121e0c361076b4f23c158d236702f2f045b3b477b51075b81ceb6188d34a
 
-ARG VERSION COMMIT_HASH
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM golang:alpine@${GOLANG_DIGEST} AS golang-base
+FROM nixos/nix@${NIX_DIGEST} AS nix-base
 
-RUN apk add --no-cache git
+FROM alpine-base AS verifier
 
-WORKDIR /build
+ARG COMMIT_HASH
 
-RUN git clone --depth 1 --branch "${VERSION}" https://github.com/rclone/rclone.git . && \
-    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+RUN apk add --no-cache git ca-certificates
 
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-w -s" -o rclone
+WORKDIR /verify
 
-FROM debian:trixie-slim AS tool-builder
+RUN git init . && \
+    git remote add origin https://github.com/rclone/rclone.git && \
+    git fetch --depth 1 origin "${COMMIT_HASH}" && \
+    git checkout FETCH_HEAD
 
-ARG TARGET_BINS="/usr/bin/sqlite3 /usr/lib/7zip/7zz /bin/bash /bin/cp /bin/rm /bin/mkdir /usr/bin/date /usr/bin/find"
+FROM golang-base AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    sqlite3 7zip-standalone coreutils findutils ca-certificates tzdata binutils \
-    && rm -rf /var/lib/apt/lists/*
+ARG VERSION
 
-WORKDIR /rootfs
+WORKDIR /src
 
-RUN set -ex; \
-    mkdir -p bin sbin usr/bin usr/sbin usr/lib/7zip etc/ssl/certs etc/zoneinfo tmp var/log; \
-    for bin in $TARGET_BINS; do \
-        REAL_BIN=$(realpath "$bin"); \
-        cp --parents -v -L "$REAL_BIN" ./; \
-        if [ "$REAL_BIN" != "$bin" ]; then cp --parents -v -L "$bin" ./; fi; \
-        INTERP=$(readelf -l "$REAL_BIN" | grep "program interpreter" | sed 's/.*: \(.*\)]/\1/') || true; \
-        if [ -n "$INTERP" ]; then cp --parents -v -L "$INTERP" ./; fi; \
-        ldd "$REAL_BIN" | awk 'NF == 4 {print $3}; NF == 2 {print $1}' | grep "^/" | sort -u | xargs -I '{}' cp --parents -v -L "{}" ./; \
-    done; \
-    ln -sf /usr/lib/7zip/7zz ./usr/bin/7zz; \
-    cp -a /etc/ssl/certs/. etc/ssl/certs/; \
-    cp -a /usr/share/zoneinfo/Asia/Bangkok etc/zoneinfo/Asia/Bangkok
+COPY --from=verifier /verify/ ./
 
-RUN set -ex; \
-    mkdir -p usr/lib; \
-    if [ -d "lib" ]; then cp -a lib/. usr/lib/ && rm -rf lib; fi; \
-    if [ -d "lib64" ]; then cp -a lib64/. usr/lib/ && rm -rf lib64; fi; \
-    ln -s usr/lib lib; \
-    ln -s usr/lib lib64
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-w -s -X github.com/rclone/rclone/fs.Version=${VERSION}" -o rclone
+
+RUN mkdir -p /rootfs/usr/local/bin && cp rclone /rootfs/usr/local/bin/
+
+FROM nix-base AS utils
+
+RUN mkdir -p /rootfs/tmp /rootfs/usr/local/bin /rootfs/etc/ssl/certs /rootfs/usr/share/zoneinfo/Asia /rootfs/bin && \
+    chmod 1777 /rootfs/tmp
+
+COPY /scripts/backup.sh /rootfs/usr/local/bin/backup.sh
+
+COPY /scripts/restore.sh /rootfs/usr/local/bin/restore.sh
+
+RUN nix-build -E ' \
+  let \
+    pkgs = import <nixpkgs> {}; \
+    _7zz-fixed = pkgs.pkgsStatic._7zz.overrideAttrs (old: { \
+      env = (old.env or {}) // { \
+        NIX_CFLAGS_COMPILE = (old.env.NIX_CFLAGS_COMPILE or "") + " -Wno-error"; \
+      }; \
+    }); \
+  in \
+  pkgs.symlinkJoin { \
+    name = "nix-rootfs"; \
+    paths = [ \
+      pkgs.pkgsStatic.sqlite \
+      _7zz-fixed \
+      pkgs.pkgsStatic.bash \
+      pkgs.pkgsStatic.coreutils \
+      pkgs.pkgsStatic.findutils \
+      pkgs.cacert \
+      pkgs.tzdata \
+    ]; \
+  }' -o /tmp/nix-rootfs
+
+RUN cp -L /tmp/nix-rootfs/bin/bash /rootfs/usr/local/bin/bash && \
+    cp -L /tmp/nix-rootfs/bin/coreutils /rootfs/usr/local/bin/coreutils && \
+    cp -L /tmp/nix-rootfs/bin/sqlite3 /rootfs/usr/local/bin/sqlite3 && \
+    cp -L /tmp/nix-rootfs/bin/7zz /rootfs/usr/local/bin/7zz && \
+    cp -L /tmp/nix-rootfs/bin/find /rootfs/usr/local/bin/find && \
+    for cmd in cp rm mkdir ls cat chmod chown du ln mv sleep touch echo date; do \
+      ln -s coreutils /rootfs/usr/local/bin/$cmd; \
+    done && \
+    chmod +x /rootfs/usr/local/bin/* && \
+    ln -s /usr/local/bin/bash /rootfs/bin/bash && \
+    cp -L /tmp/nix-rootfs/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok && \
+    cp -L /tmp/nix-rootfs/etc/ssl/certs/ca-bundle.crt /rootfs/etc/ssl/certs/ca-certificates.crt && \
+    echo "nonroot:x:1000:1000:nonroot:/usr/local/bin:/sbin/nologin" > /rootfs/etc/passwd && echo "nonroot:x:1000:" > /rootfs/etc/group
+
+RUN nix-shell -p binutils --run "find /rootfs/usr/local/bin -type f -exec strip -s {} \;"
+
+FROM scratch AS exporter
+
+COPY --from=builder /rootfs/ /
+
+COPY --from=utils /rootfs/ /
 
 FROM scratch
 
-COPY --from=tool-builder /rootfs/ /
+COPY --from=exporter / /
 
-WORKDIR /app
+USER 1000:1000
 
-COPY --from=rclone-builder /build/rclone /usr/bin/rclone
-
-COPY /scripts/backup.sh /app/backup.sh
-COPY /scripts/restore.sh /app/restore.sh
-
-ENV PATH="/usr/sbin:/usr/bin:/sbin:/bin:/app"
 ENV TZ=Asia/Bangkok
 
-ENTRYPOINT ["/bin/bash", "/app/backup.sh"]
+ENTRYPOINT ["bash"]
+CMD ["-c", "backup.sh"]
