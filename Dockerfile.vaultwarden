@@ -1,6 +1,14 @@
-FROM debian:trixie-slim@sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430 AS verifier
+ARG DEBIAN_DIGEST=sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430
+ARG GOLANG_DIGEST=sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e
+ARG RUST_DIGEST=sha256:ef7b340d4201444fa2757dfddfd4c03be9d2bde468de7b7a68b0e9fabb794334
 
-ARG VW_VERSION VW_COMMIT_HASH WV_VERSION WV_SHA256
+FROM debian:trixie-slim@${DEBIAN_DIGEST} AS debian-base
+FROM golang:alpine@${GOLANG_DIGEST} AS golang-base
+FROM rust:alpine@${RUST_DIGEST} AS rust-base
+
+FROM debian-base AS verifier
+
+ARG VW_COMMIT_HASH WV_VERSION WV_SHA256
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl git ca-certificates coreutils && rm -rf /var/lib/apt/lists/*
 
@@ -11,80 +19,114 @@ RUN set -ex; \
     echo "${WV_SHA256}  bw_web_${WV_VERSION}.tar.gz" | sha256sum -c -; \
     mkdir -p /verified-web; \
     tar -xzf "bw_web_${WV_VERSION}.tar.gz" -C /verified-web --strip-components=1; \
-    mkdir -p /verified-src; \
-    git clone --depth 1 --branch ${VW_VERSION} https://github.com/dani-garcia/vaultwarden.git /verified-src; \
-    cd /verified-src; \
-    [ "$(git rev-parse HEAD)" = "$VW_COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+    mkdir -p /verified-src; cd /verified-src; \
+    git init . && \
+    git remote add origin https://github.com/dani-garcia/vaultwarden.git && \
+    git fetch --depth 1 origin "${VW_COMMIT_HASH}" && \
+    git checkout FETCH_HEAD
 
-FROM rust:alpine@sha256:ef7b340d4201444fa2757dfddfd4c03be9d2bde468de7b7a68b0e9fabb794334 AS base
+FROM debian-base AS frontend
 
-RUN apk add --no-cache build-base git pkgconfig openssl-dev openssl-libs-static sqlite-dev sqlite-static ca-certificates tzdata
+WORKDIR /rootfs
 
-FROM base AS frontend
+RUN mkdir web-vault
 
-WORKDIR /web-vault
+COPY --from=verifier /verified-web ./web-vault
 
-COPY --from=verifier /verified-web .
-
-RUN find . -name "*.map" -type f -delete && find . -name "*.txt" -type f -delete && rm -rf videos && \
+RUN cd web-vault && find . -name "*.map" -type f -delete && find . -name "*.txt" -type f -delete && rm -rf videos && \
     if [ -d "locales" ]; then find locales -maxdepth 1 -type d ! -name "locales" ! -name "en" -exec rm -rf {} +; fi && \
     find . -type d -exec chmod 755 {} + && find . -type f -exec chmod 444 {} +
 
-FROM base AS backend
+FROM rust-base AS backend
+
+ARG VW_VERSION
+
+RUN apk add --no-cache build-base pkgconfig openssl-dev openssl-libs-static sqlite-dev sqlite-static
 
 ENV OPENSSL_STATIC=1 RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" CARGO_PROFILE_RELEASE_OPT_LEVEL="3" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" CARGO_PROFILE_RELEASE_LTO="fat" CARGO_PROFILE_RELEASE_PANIC="abort" CARGO_PROFILE_RELEASE_STRIP="true"
 
-WORKDIR /src
+WORKDIR /rootfs
 
 COPY --from=verifier /verified-src .
 
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
     cargo build --features "sqlite,enable_mimalloc" --release --locked --target "$TARGET" && \
-    cp "target/$TARGET/release/vaultwarden" /vaultwarden
+    mkdir -p usr/local/bin && cp "target/$TARGET/release/vaultwarden" usr/local/bin/vaultwarden
 
-FROM base AS utils
+FROM golang-base AS utils
 
-COPY <<'EOF' healthcheck.c
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <stdlib.h>
-int main() {
-    char *port_env = getenv("ROCKET_PORT");
-    int port = port_env ? atoi(port_env) : 80;
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) return 1;
-    struct sockaddr_in a = {0};
-    a.sin_family = AF_INET;
-    a.sin_port = htons(port);
-    a.sin_addr.s_addr = inet_addr("127.0.0.1");
-    int r = connect(s, (struct sockaddr *)&a, sizeof(a));
-    close(s);
-    return (r == 0) ? 0 : 1;
+RUN apk add --no-cache ca-certificates tzdata
+
+WORKDIR /src
+
+RUN mkdir -p rootfs/usr/local/bin rootfs/etc/ssl/certs rootfs/usr/share/zoneinfo/Asia rootfs/data rootfs/tmp
+
+COPY <<'EOF' main.go
+package main
+import (
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+)
+func main() {
+	port := os.Getenv("ROCKET_PORT")
+	if port == "" { port = "80" }
+	addr := os.Getenv("ROCKET_ADDRESS")
+	if addr == "" || addr == "0.0.0.0" || addr == "::" { addr = "127.0.0.1" }
+	basePath := ""
+	data, err := os.ReadFile("/data/config.json")
+	if err == nil {
+		var cfg map[string]interface{}
+		if json.Unmarshal(data, &cfg) == nil {
+			if domain, ok := cfg["domain"].(string); ok && domain != "" {
+                domain = strings.TrimSuffix(domain, "/")
+				parts := strings.SplitN(domain, "://", 2)
+				if len(parts) == 2 {
+					paths := strings.Split(parts[1], "/")
+					if len(paths) > 1 {
+						basePath = "/" + strings.Join(paths[1:], "/")
+					}
+				}
+			}
+		}
+	}
+	protocol := "http"
+	if _, ok := os.LookupEnv("ROCKET_TLS"); ok { protocol = "https" }
+	url := fmt.Sprintf("%s://%s:%s%s/alive", protocol, addr, port, basePath)
+    url = strings.ReplaceAll(url, "//alive", "/alive")
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	resp, err := client.Get(url)
+	if err != nil || resp.StatusCode != 200 { os.Exit(1) }
+	os.Exit(0)
 }
 EOF
 
-RUN gcc -static -Os -s -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -o /healthcheck healthcheck.c
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o rootfs/usr/local/bin/healthcheck main.go
 
-RUN echo "vaultwarden:x:1000:1000:vaultwarden:/var/empty:/sbin/nologin" > /passwd.custom && echo "vaultwarden:x:1000:" > /group.custom
+RUN echo "vaultwarden:x:1000:1000:vaultwarden:/var/empty:/sbin/nologin" > rootfs/etc/passwd && \
+    echo "vaultwarden:x:1000:" > rootfs/etc/group && \
+    cp /etc/ssl/certs/ca-certificates.crt rootfs/etc/ssl/certs/ && \
+    cp /usr/share/zoneinfo/Asia/Bangkok rootfs/usr/share/zoneinfo/Asia/Bangkok && \
+    chmod 1777 rootfs/tmp && chown -R 1000:1000 rootfs/data rootfs/tmp
 
-FROM base AS exporter
+FROM scratch AS exporter
 
-RUN mkdir -p /rootfs/usr/bin /rootfs/web-vault /rootfs/etc/ssl/certs /rootfs/data /rootfs/tmp
-
-COPY --from=utils /passwd.custom /rootfs/etc/passwd
-COPY --from=utils /group.custom /rootfs/etc/group
-COPY --from=base /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/
-COPY --from=base /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok
-COPY --from=backend /vaultwarden /rootfs/usr/bin/vaultwarden
-COPY --from=utils /healthcheck /rootfs/usr/bin/healthcheck
-COPY --from=frontend /web-vault /rootfs/web-vault
-
-RUN chmod 1777 /rootfs/tmp && chown -R 1000:1000 /rootfs/data /rootfs/tmp
+COPY --from=utils /src/rootfs /
+COPY --from=frontend /rootfs/web-vault /web-vault
+COPY --from=backend /rootfs/usr/local/bin/vaultwarden /usr/local/bin/vaultwarden
 
 FROM scratch
 
-COPY --from=exporter /rootfs/ /
+COPY --from=exporter / /
 
 USER 1000:1000
 
@@ -92,6 +134,6 @@ WORKDIR /data
 
 ENV WEB_VAULT_FOLDER=/web-vault TZ=Asia/Bangkok
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/bin/healthcheck"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["healthcheck"]
 
-ENTRYPOINT ["/usr/bin/vaultwarden"]
+ENTRYPOINT ["vaultwarden"]
