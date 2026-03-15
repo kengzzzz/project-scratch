@@ -46,15 +46,27 @@ RUN mkdir -p usr/sbin sbin etc/ssl/certs usr/share/zoneinfo/Asia tmp var/lib/tai
 
 RUN chmod 1777 tmp
 
-RUN nix-build -E '(import <nixpkgs> {}).pkgsStatic.iptables' -o /tmp/iptables-static && \
-    nix-build -E '(import <nixpkgs> {}).pkgsStatic.iproute2' -o /tmp/iproute2-static && \
-    nix-build -E '(import <nixpkgs> {}).cacert' -o /tmp/cacert && \
-    nix-build -E '(import <nixpkgs> {}).tzdata' -o /tmp/tzdata
+RUN nix-build -E ' \
+      let \
+        pkgs = import <nixpkgs> {}; \
+        stripBin = name: pkg: binPath: pkgs.runCommand "${name}-stripped" { \
+            nativeBuildInputs = [ pkgs.buildPackages.binutils ]; \
+          } "mkdir -p $out/bin && cp -L ${pkg}${binPath} $out/bin/${name} && chmod +w $out/bin/${name} && strip -s $out/bin/${name}"; \
+        \
+        iptables-stripped = stripBin "iptables" pkgs.pkgsStatic.iptables "/bin/iptables"; \
+        iproute2-stripped = stripBin "ip" pkgs.pkgsStatic.iproute2 "/bin/ip"; \
+      in \
+      pkgs.linkFarm "tools" [ \
+        { name = "iptables"; path = iptables-stripped; } \
+        { name = "ip";       path = iproute2-stripped; } \
+        { name = "cacert";   path = pkgs.cacert; } \
+        { name = "tzdata";   path = pkgs.tzdata; } \
+      ]' -o /tmp/outputs
 
-RUN cp -vL /tmp/iptables-static/bin/iptables ./usr/sbin/iptables && \
-    cp -vL /tmp/iproute2-static/bin/ip ./sbin/ip && \
-    cp -vL /tmp/cacert/etc/ssl/certs/ca-bundle.crt ./etc/ssl/certs/ca-certificates.crt && \
-    cp -vL /tmp/tzdata/share/zoneinfo/Asia/Bangkok ./usr/share/zoneinfo/Asia/Bangkok && \
+RUN cp -vL /tmp/outputs/iptables/bin/iptables ./usr/sbin/iptables && \
+    cp -vL /tmp/outputs/ip/bin/ip ./sbin/ip && \
+    cp -vL /tmp/outputs/cacert/etc/ssl/certs/ca-bundle.crt ./etc/ssl/certs/ca-certificates.crt && \
+    cp -vL /tmp/outputs/tzdata/share/zoneinfo/Asia/Bangkok ./usr/share/zoneinfo/Asia/Bangkok && \
     ln -s iptables ./usr/sbin/ip6tables
 
 FROM scratch AS exporter
