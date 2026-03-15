@@ -1,4 +1,10 @@
-FROM debian:trixie-slim@sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430 AS verifier
+ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+ARG DEBIAN_DIGEST=sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430
+
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM debian:trixie-slim@${DEBIAN_DIGEST} AS debian-base
+
+FROM debian-base AS verifier
 
 ARG VERSION SOURCE_SHA256 MIN_TRUSTED_SIGNERS=5
 
@@ -22,7 +28,7 @@ RUN set -ex; \
     mkdir -p /verified-src; \
     tar -xzf "bitcoin-$V.tar.gz" -C /verified-src --strip-components=1
 
-FROM alpine@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 AS builder
+FROM alpine-base AS builder
 
 RUN apk add --no-cache build-base libtool autoconf automake pkgconf curl python3 cmake ninja bash patch linux-headers ca-certificates
 
@@ -59,10 +65,10 @@ RUN export HOST=$(uname -m)-linux-musl && cmake -B build -G Ninja --toolchain /s
 
 RUN cmake --build build --parallel $(nproc)
 
-RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/usr/bin /rootfs-writable/data /rootfs-writable/tmp && \
+RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/usr/local/bin /rootfs-writable/data /rootfs-writable/tmp && \
     echo "bitcoind:x:1000:1000:bitcoind:/data:/sbin/nologin" > /rootfs/etc/passwd && echo "bitcoind:x:1000:" > /rootfs/etc/group && \
     strip -s build/bin/bitcoind build/bin/bitcoin-cli && \
-    cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && cp build/bin/bitcoind build/bin/bitcoin-cli /rootfs/usr/bin/ && \
+    cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && cp build/bin/bitcoind build/bin/bitcoin-cli /rootfs/usr/local/bin/ && \
     chmod 1777 /rootfs-writable/tmp
 
 FROM scratch AS exporter
@@ -81,7 +87,7 @@ WORKDIR /data
 
 ENV BITCOIN_DATA=/data
 
-HEALTHCHECK --interval=60s --timeout=5s --start-period=15s --retries=3 CMD ["/usr/bin/bitcoin-cli", "-datadir=/data", "getblockchaininfo"]
+HEALTHCHECK --interval=60s --timeout=5s --start-period=15s --retries=3 CMD ["bitcoin-cli", "-datadir=/data", "getblockchaininfo"]
 
-ENTRYPOINT ["/usr/bin/bitcoind"]
+ENTRYPOINT ["bitcoind"]
 CMD ["-datadir=/data", "-conf=/data/bitcoin.conf", "-printtoconsole"]
