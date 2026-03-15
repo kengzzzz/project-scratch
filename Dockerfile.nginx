@@ -1,19 +1,18 @@
 FROM alpine@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 AS builder
 
-ARG VERSION COMMIT_HASH
+ARG COMMIT_HASH
 
-RUN apk add --no-cache git make gcc g++ linux-headers musl-dev pcre2-dev pcre2-static zlib-dev zlib-static openssl-dev openssl-libs-static pkgconf tzdata libcap
+RUN apk add --no-cache git make gcc linux-headers musl-dev pcre2-dev pcre2-static openssl-dev openssl-libs-static pkgconf tzdata libcap
 
 WORKDIR /src
 
-RUN git clone --depth 1 --branch ${VERSION} https://github.com/nginx/nginx.git . && \
-    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+RUN git init . && \
+    git remote add origin https://github.com/nginx/nginx.git && \
+    git fetch --depth 1 origin "${COMMIT_HASH}" && \
+    git checkout FETCH_HEAD
 
 RUN ./auto/configure \
-    --prefix=/etc/nginx \
-    --sbin-path=/usr/sbin/nginx \
-    --modules-path=/usr/lib/nginx/modules \
-    --conf-path=/etc/nginx/nginx.conf \
+    --sbin-path=/usr/local/bin/nginx \
     --error-log-path=/dev/stderr \
     --http-log-path=/dev/stdout \
     --pid-path=/tmp/nginx.pid \
@@ -68,15 +67,15 @@ RUN ./auto/configure \
     --without-stream_upstream_hash_module \
     --without-stream_upstream_least_conn_module \
     --without-stream_upstream_random_module \
-    --without-stream_upstream_zone_module \
-    && make -j$(nproc) \
-    && make DESTDIR=/rootfs install
+    --without-stream_upstream_zone_module
+
+RUN make -j$(nproc) && make DESTDIR=/rootfs install
 
 RUN mkdir -p /rootfs/etc /rootfs/usr/bin /rootfs/usr/share/zoneinfo/Asia /rootfs-writable/tmp /rootfs-writable/var/log/nginx && \
     echo "nginx:x:1000:1000:nginx:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && echo "nginx:x:1000:" > /rootfs/etc/group && \
     cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok
 
-RUN strip -s /rootfs/usr/sbin/nginx && setcap 'cap_net_bind_service=+ep' /rootfs/usr/sbin/nginx
+RUN strip -s /rootfs/usr/local/bin/nginx && setcap 'cap_net_bind_service=+ep' /rootfs/usr/local/bin/nginx
 
 RUN cat <<'EOF' > healthcheck.c
 #include <stdio.h>
@@ -127,19 +126,23 @@ int main() {
 }
 EOF
 
-RUN gcc -static -Os -s -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -o /rootfs/usr/bin/healthcheck healthcheck.c
+RUN gcc -static -Os -s -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -o /rootfs/usr/local/bin/healthcheck healthcheck.c
 
-FROM scratch
+FROM scratch AS exporter
 
 COPY --from=builder /rootfs /
 
 COPY --from=builder --chown=1000:1000 /rootfs-writable /
 
+FROM scratch
+
+COPY --from=exporter / /
+
 USER 1000:1000
 
 ENV TZ=Asia/Bangkok
 
-HEALTHCHECK --interval=30s --timeout=2s --start-period=10s --retries=3 CMD ["/usr/bin/healthcheck"]
+HEALTHCHECK --interval=30s --timeout=2s --start-period=10s --retries=3 CMD ["healthcheck"]
 
-ENTRYPOINT ["/usr/sbin/nginx"]
+ENTRYPOINT ["nginx"]
 CMD ["-g", "daemon off;"]
