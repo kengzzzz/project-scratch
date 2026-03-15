@@ -1,78 +1,111 @@
-FROM rust:alpine@sha256:ef7b340d4201444fa2757dfddfd4c03be9d2bde468de7b7a68b0e9fabb794334 AS builder
+ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+ARG GOLANG_DIGEST=sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e
+ARG RUST_DIGEST=sha256:ef7b340d4201444fa2757dfddfd4c03be9d2bde468de7b7a68b0e9fabb794334
 
-ARG VERSION COMMIT_HASH
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM golang:alpine@${GOLANG_DIGEST} AS golang-base
+FROM rust:alpine@${RUST_DIGEST} AS rust-base
+
+FROM alpine-base AS verifier
+
+ARG COMMIT_HASH
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /verify
+
+RUN git init . && \
+    git remote add origin https://gitlab.torproject.org/tpo/core/arti.git && \
+    git fetch --depth 1 origin "${COMMIT_HASH}" && \
+    git checkout FETCH_HEAD
+
+FROM rust-base AS builder
+
 ENV RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" CARGO_PROFILE_RELEASE_OPT_LEVEL="3" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" CARGO_PROFILE_RELEASE_LTO="fat" CARGO_PROFILE_RELEASE_PANIC="abort" CARGO_PROFILE_RELEASE_STRIP="true"
 
-RUN apk add --no-cache build-base git sqlite-dev sqlite-static ca-certificates tzdata
+RUN apk add --no-cache build-base sqlite-dev sqlite-static
 
 WORKDIR /src
-RUN git clone --depth 1 --branch ${VERSION} https://gitlab.torproject.org/tpo/core/arti.git . && \
-    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+
+COPY --from=verifier /verify/ ./
 
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && cargo build -p arti --release --locked \
     --no-default-features --features "rustls,tokio,static-sqlite,dns-proxy,compression,onion-service-client,onion-service-service" \
-    --target "$TARGET" && cp "target/$TARGET/release/arti" target/release/arti
+    --target "$TARGET" && mkdir -p /rootfs/usr/local/bin/ && cp "target/$TARGET/release/arti" /rootfs/usr/local/bin/arti
 
-RUN cat <<'EOF' > healthcheck.c
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+FROM golang-base AS utils
 
-int get_port() {
-    int port = 9150;
-    FILE *f = fopen("/data/arti.toml", "r");
-    if (!f) return port;
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        if (strstr(line, "socks_listen")) {
-            char *colon = strrchr(line, ':');
-            if (colon) {
-                int p = atoi(colon + 1);
-                if (p > 0 && p <= 65535) { port = p; break; }
-            }
-        }
-    }
-    fclose(f);
-    return port;
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /src
+
+COPY <<'EOF' healthcheck.go
+package main
+import (
+	"bufio"
+	"fmt"
+	"net"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+func getPort() int {
+	port := 9150
+	file, err := os.Open("/data/arti.toml")
+	if err != nil {
+		return port
+	}
+	defer file.Close()
+	re := regexp.MustCompile(`socks_listen.*?:(\d+)`)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		matches := re.FindStringSubmatch(line)
+		if len(matches) > 1 {
+			if p, err := strconv.Atoi(matches[1]); err == nil && p > 0 && p <= 65535 {
+				return p
+			}
+		}
+	}
+	return port
 }
-
-int main() {
-    int port = get_port();
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) return 1;
-    struct sockaddr_in a = {0};
-    a.sin_family = AF_INET;
-    a.sin_port = htons(port);
-    a.sin_addr.s_addr = inet_addr("127.0.0.1");
-    int r = connect(s, (struct sockaddr *)&a, sizeof(a));
-    close(s);
-    return (r == 0) ? 0 : 1;
+func main() {
+	port := getPort()
+	address := fmt.Sprintf("127.0.0.1:%d", port)
+	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
+	if err != nil {
+		os.Exit(1)
+	}
+	conn.Close()
+	os.Exit(0)
 }
 EOF
 
-RUN gcc -static -Os -s -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -o healthcheck healthcheck.c
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o healthcheck healthcheck.go
 
-RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/usr/bin /rootfs/usr/share /rootfs-writable/data /rootfs-writable/tmp && \
-    echo "arti:x:1000:1000:arti:/var/empty:/sbin/nologin" > /rootfs/etc/passwd && echo "arti:x:1000:" > /rootfs/etc/group && \
-    cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && cp target/release/arti /rootfs/usr/bin/ && cp healthcheck /rootfs/usr/bin/ && \
-    chmod 1777 /rootfs-writable/tmp
+RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/usr/local/bin /rootfs/data /rootfs/tmp && \
+    echo "arti:x:1000:1000:arti:/data:/sbin/nologin" > /rootfs/etc/passwd && echo "arti:x:1000:" > /rootfs/etc/group && \
+    cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && cp healthcheck /rootfs/usr/local/bin/ && \
+    chmod 1777 /rootfs/tmp && chmod 0700 /rootfs/data && chown -R 1000:1000 /rootfs/tmp /rootfs/data
 
-FROM scratch
+FROM scratch AS exporter
 
 COPY --from=builder /rootfs/ /
 
-COPY --from=builder --chown=1000:1000 /rootfs-writable/ /
+COPY --from=utils /rootfs/ /
+
+FROM scratch
+
+COPY --from=exporter / /
 
 USER 1000:1000
 
-WORKDIR /data
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["healthcheck"]
 
-ENV HOME=/data
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["/usr/bin/healthcheck"]
-
-ENTRYPOINT ["/usr/bin/arti"]
+ENTRYPOINT ["arti"]
 CMD ["proxy", "-c", "/data/arti.toml"]
