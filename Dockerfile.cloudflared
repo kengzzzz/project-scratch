@@ -1,65 +1,91 @@
-FROM golang:alpine@sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e AS builder
+ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+ARG GOLANG_DIGEST=sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e
+
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM golang:alpine@${GOLANG_DIGEST} AS golang-base
+
+FROM alpine-base AS verifier
+
+ARG COMMIT_HASH
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /verify
+
+RUN git init . && \
+    git remote add origin https://github.com/cloudflare/cloudflared.git && \
+    git fetch --depth 1 origin "${COMMIT_HASH}" && \
+    git checkout FETCH_HEAD
+
+FROM golang-base AS base
 
 ARG VERSION COMMIT_HASH
 
-RUN apk add --no-cache git build-base tzdata ca-certificates
+ENV CGO_ENABLED=0
 
-WORKDIR /build
+RUN apk add --no-cache git ca-certificates
 
-RUN git clone --depth 1 --branch ${VERSION} https://github.com/cloudflare/cloudflared.git . && \
-    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+FROM base AS builder
 
-RUN CGO_ENABLED=0 go build \
-    -trimpath \
-    -ldflags="-w -s" \
-    -o cloudflared \
-    ./cmd/cloudflared
+ARG VERSION
 
-RUN cat <<EOF > healthcheck.c
-#include <stdio.h>
-#include <string.h>
+WORKDIR /src
 
-int main() {
-    FILE *fp = fopen("/proc/1/status", "r");
-    if (!fp) return 1;
+COPY --from=verifier /verify/ ./
 
-    char line[256];
-    int healthy = 0;
-    while (fgets(line, sizeof(line), fp)) {
-        if (strncmp(line, "State:", 6) == 0) {
-            if (strstr(line, "Z (zombie)") == NULL) {
-                healthy = 1;
-            }
-            break;
-        }
-    }
-    fclose(fp);
-    return healthy ? 0 : 1;
+RUN go build -trimpath \
+    -ldflags="-w -s -X 'main.Version=${VERSION}' -X 'main.BuildTime=$(date -u '+%Y-%m-%d-%H:%M UTC')'" \
+    -o cloudflared ./cmd/cloudflared
+
+RUN mkdir -p rootfs/usr/local/bin && cp cloudflared rootfs/usr/local/bin/
+
+FROM base AS utils
+
+RUN apk add --no-cache tzdata
+
+WORKDIR /src
+
+RUN cat <<EOF > healthcheck.go
+package main
+import (
+	"net/http"
+	"os"
+	"time"
+)
+func main() {
+	client := http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:20000/ready")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 EOF
 
-RUN gcc -static -Os -march=native -o healthcheck healthcheck.c && \
-    strip healthcheck
+RUN go build -trimpath -ldflags="-w -s" -o healthcheck healthcheck.go
 
-RUN echo "cloudflared:x:1000:1000:cloudflared:/app:/sbin/nologin" > /etc/passwd.custom && \
-    echo "cloudflared:x:1000:" > /etc/group.custom
+RUN mkdir -p rootfs/etc/ssl/certs rootfs/usr/share/zoneinfo/Asia rootfs/usr/local/bin && \
+    cp healthcheck rootfs/usr/local/bin/healthcheck && \
+    cp /etc/ssl/certs/ca-certificates.crt rootfs/etc/ssl/certs/ && \
+    cp /usr/share/zoneinfo/Asia/Bangkok rootfs/usr/share/zoneinfo/Asia/Bangkok && \
+    echo "cloudflared:x:1000:1000:cloudflared:/usr/local/bin:/sbin/nologin" > rootfs/etc/passwd && \
+    echo "cloudflared:x:1000:" > rootfs/etc/group
+
+FROM scratch AS exporter
+
+COPY --from=builder /src/rootfs /
+
+COPY --from=utils /src/rootfs /
 
 FROM scratch
 
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
-COPY --from=builder /etc/passwd.custom /etc/passwd
-COPY --from=builder /etc/group.custom /etc/group
-
-WORKDIR /app
-
-COPY --from=builder /build/cloudflared /app/cloudflared
-COPY --from=builder /build/healthcheck /app/healthcheck
+COPY --from=exporter / /
 
 USER 1000:1000
 
-ENV TZ=Asia/Bangkok
+ENV TZ=Asia/Bangkok TUNNEL_METRICS="0.0.0.0:20000"
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/app/healthcheck"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["healthcheck"]
 
-ENTRYPOINT ["/app/cloudflared"]
+ENTRYPOINT ["cloudflared"]
+CMD ["--no-autoupdate", "tunnel", "run"]
