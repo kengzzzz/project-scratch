@@ -1,30 +1,55 @@
-FROM alpine@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 AS builder
+ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
 
-ARG VERSION COMMIT_HASH
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
 
-RUN apk add --no-cache git make gcc g++ linux-headers musl-dev tzdata
+FROM alpine-base AS verifier
+
+ARG COMMIT_HASH
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /verify
+
+RUN git init . && \
+    git remote add origin https://github.com/redis/redis.git && \
+    git fetch --depth 1 origin "${COMMIT_HASH}" && \
+    git checkout FETCH_HEAD
+
+FROM alpine-base AS builder
+
+RUN apk update && apk upgrade && \
+    apk add --no-cache make gcc g++ linux-headers musl-dev tzdata pkgconf
 
 WORKDIR /build
 
-RUN git clone --depth 1 --branch ${VERSION} https://github.com/redis/redis.git . && \
-    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+COPY --from=verifier /verify/ ./
 
-RUN make -j "$(nproc)" BUILD_TLS=no CFLAGS="-ffunction-sections -fdata-sections -march=native" LDFLAGS="-static -Wl,--gc-sections"
+ENV CFLAGS="-O3 -flto=auto -no-pie -march=native -ffunction-sections -fdata-sections" \
+    LDFLAGS="-static -Wl,--gc-sections"
 
-RUN mkdir -p /rootfs/etc /rootfs/bin /rootfs/usr/share/zoneinfo/Asia /data && \
-    echo "redis:x:1000:1000:redis:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && echo "redis:x:1000:" > /rootfs/etc/group && \
+RUN make -j "$(nproc)" BUILD_TLS=no
+
+RUN mkdir -p /rootfs/etc /rootfs/usr/local/bin /rootfs/usr/share/zoneinfo/Asia /rootfs/data && \
+    echo "redis:x:1000:1000:redis:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && \
+    echo "redis:x:1000:" > /rootfs/etc/group && \
     strip -s /build/src/redis-server /build/src/redis-cli && \
-    cp /build/src/redis-server /rootfs/bin/ && cp /build/src/redis-cli /rootfs/bin/ && cp /build/redis.conf /rootfs/etc/ && cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok
+    cp /build/src/redis-server /build/src/redis-cli /rootfs/usr/local/bin/ && \
+    cp /build/redis.conf /rootfs/etc/ && \
+    cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok
 
 RUN sed -i 's/^bind.*/bind 0.0.0.0/' /rootfs/etc/redis.conf && \
     sed -i 's/^protected-mode yes/protected-mode no/' /rootfs/etc/redis.conf && \
     sed -i 's/^dir .*/dir \/data/' /rootfs/etc/redis.conf
 
+FROM scratch AS exporter
+
+COPY --from=builder /rootfs/etc /etc
+COPY --from=builder /rootfs/usr /usr
+COPY --from=builder --chown=1000:1000 /rootfs/data /data
+
 FROM scratch
 
-COPY --from=builder /rootfs /
-
-COPY --from=builder --chown=1000:1000 /data /data
+COPY --from=exporter / /
 
 USER 1000:1000
 
@@ -32,7 +57,7 @@ WORKDIR /data
 
 ENV TZ=Asia/Bangkok
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/bin/redis-cli", "ping"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["redis-cli", "ping"]
 
-ENTRYPOINT ["/bin/redis-server"]
+ENTRYPOINT ["redis-server"]
 CMD ["/etc/redis.conf"]
