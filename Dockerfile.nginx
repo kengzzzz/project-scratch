@@ -1,15 +1,31 @@
-FROM alpine@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 AS builder
+ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+ARG DEBIAN_DIGEST=sha256:26f98ccd92fd0a44d6928ce8ff8f4921b4d2f535bfa07555ee5d18f61429cf0c
+
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM debian@${DEBIAN_DIGEST} AS debian-base
+
+FROM alpine-base AS verifier
 
 ARG COMMIT_HASH
 
-RUN apk add --no-cache git make gcc linux-headers musl-dev pcre2-dev pcre2-static openssl-dev openssl-libs-static pkgconf tzdata libcap
+RUN apk add --no-cache git ca-certificates
 
-WORKDIR /src
+WORKDIR /verify
 
 RUN git init . && \
     git remote add origin https://github.com/nginx/nginx.git && \
     git fetch --depth 1 origin "${COMMIT_HASH}" && \
     git checkout FETCH_HEAD
+
+FROM debian-base AS builder
+
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    make gcc libpcre2-dev libssl-dev libzstd-dev zlib1g-dev pkg-config tzdata libcap2-bin musl-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+COPY --from=verifier /verify/ ./
 
 RUN ./auto/configure \
     --sbin-path=/usr/local/bin/nginx \
@@ -28,7 +44,7 @@ RUN ./auto/configure \
     --with-stream_ssl_module \
     --with-pcre-jit \
     --with-cc-opt="-O3 -flto=auto -ffunction-sections -fdata-sections -march=native" \
-    --with-ld-opt="-static -Wl,--gc-sections" \
+    --with-ld-opt="-static -Wl,--gc-sections -lzstd -lz" \
     --without-http_gzip_module \
     --without-http_charset_module \
     --without-http_ssi_module \
@@ -126,7 +142,7 @@ int main() {
 }
 EOF
 
-RUN gcc -static -Os -s -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -o /rootfs/usr/local/bin/healthcheck healthcheck.c
+RUN musl-gcc -static -Os -s -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -o /rootfs/usr/local/bin/healthcheck healthcheck.c
 
 FROM scratch AS exporter
 
