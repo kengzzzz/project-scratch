@@ -1,18 +1,47 @@
-FROM alpine@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 AS builder
+ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+ARG DEBIAN_DIGEST=sha256:26f98ccd92fd0a44d6928ce8ff8f4921b4d2f535bfa07555ee5d18f61429cf0c
 
-ARG VERSION COMMIT_HASH
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM debian@${DEBIAN_DIGEST} AS debian-base
 
-RUN apk add --no-cache git make gcc g++ bison flex linux-headers musl-dev openssl-dev openssl-libs-static expat-dev expat-static hiredis-dev zlib-static pkgconfig tzdata ca-certificates curl
+FROM alpine-base AS verifier
+
+ARG COMMIT_HASH
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /verify
+
+RUN git init . && \
+    git remote add origin https://github.com/NLnetLabs/unbound.git && \
+    git fetch --depth 1 origin "${COMMIT_HASH}" && \
+    git checkout FETCH_HEAD
+
+FROM debian-base AS builder
+
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    build-essential \
+    bison \
+    flex \
+    libssl-dev \
+    libexpat1-dev \
+    libhiredis-dev \
+    zlib1g-dev \
+    libzstd-dev \
+    pkg-config \
+    ca-certificates \
+    curl \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
-RUN git clone --depth 1 --branch ${VERSION} https://github.com/NLnetLabs/unbound.git . && \
-    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+COPY --from=verifier /verify/ ./
 
 RUN ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-static-exe --enable-cachedb --with-libhiredis --with-pthreads --enable-tfo-client \
     CFLAGS="-O3 -flto=auto -no-pie -march=native -ffunction-sections -fdata-sections"
 
-RUN make -j "$(nproc)" LDFLAGS="-all-static -Wl,--gc-sections"
+RUN make -j "$(nproc)" LDFLAGS="-all-static -Wl,--gc-sections -lzstd -lz"
 
 RUN mkdir -p /rootfs/usr/local/sbin /rootfs/etc/ssl/certs /rootfs/usr/share/zoneinfo/Asia /rootfs-writable/tmp /rootfs-writable/usr/local/etc/unbound && \
     cp unbound unbound-control /rootfs/usr/local/sbin/ && strip -s /rootfs/usr/local/sbin/* && \
@@ -20,17 +49,21 @@ RUN mkdir -p /rootfs/usr/local/sbin /rootfs/etc/ssl/certs /rootfs/usr/share/zone
     echo "unbound:x:1000:1000:unbound:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && echo "unbound:x:1000:" > /rootfs/etc/group && \
     curl -o /rootfs-writable/usr/local/etc/unbound/root.hints https://www.internic.net/domain/named.cache && ./unbound-anchor -a /rootfs-writable/usr/local/etc/unbound/root.key || true
 
-FROM scratch
+FROM scratch AS exporter
 
 COPY --from=builder /rootfs/ /
 
 COPY --from=builder --chown=1000:1000 /rootfs-writable/ /
 
+FROM scratch
+
+COPY --from=exporter / /
+
 USER 1000:1000
 
 ENV TZ=Asia/Bangkok
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/local/sbin/unbound-control", "-c", "/usr/local/etc/unbound/unbound.conf", "status"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["unbound-control", "-c", "/usr/local/etc/unbound/unbound.conf", "status"]
 
-ENTRYPOINT ["/usr/local/sbin/unbound"]
+ENTRYPOINT ["unbound"]
 CMD ["-d", "-c", "/usr/local/etc/unbound/unbound.conf"]
