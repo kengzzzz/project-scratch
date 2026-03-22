@@ -1,30 +1,65 @@
-FROM golang:1.25-alpine@sha256:8e02eb337d9e0ea459e041f1ee5eece41cbb61f1d83e7d883a3e2fb4862063fa AS builder
+ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+ARG GOLANG_DIGEST=sha256:8e02eb337d9e0ea459e041f1ee5eece41cbb61f1d83e7d883a3e2fb4862063fa
 
-ARG VERSION COMMIT_HASH
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM golang@${GOLANG_DIGEST} AS golang-base
+
+FROM alpine-base AS verifier
+
+ARG COMMIT_HASH
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /verify
+
+RUN git init . && \
+    git remote add origin https://github.com/aquasecurity/trivy.git && \
+    git fetch --depth 1 origin "${COMMIT_HASH}" && \
+    git checkout FETCH_HEAD
+
+FROM golang-base AS builder
+
+ARG VERSION
+
+RUN apk add --no-cache tzdata ca-certificates
 
 WORKDIR /build
 
-RUN apk add --no-cache git ca-certificates tzdata && git clone --depth 1 --branch "${VERSION}" https://github.com/aquasecurity/trivy.git . && \
-    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+COPY --from=verifier /verify/ ./
 
-RUN CGO_ENABLED=0 GOEXPERIMENT=jsonv2 go build -trimpath -ldflags="-s -w -extldflags '-static' -X github.com/aquasecurity/trivy/pkg/version/app.ver=${VERSION}" -o trivy ./cmd/trivy
+ENV CGO_ENABLED=0 \
+    GOEXPERIMENT=jsonv2
 
-RUN echo "trivy:x:1000:1000:trivy:/app:/sbin/nologin" > /etc/passwd.custom && echo "trivy:x:1000:" > /etc/group.custom && mkdir /empty_tmp
+# Patch CVE-2025-15558, CVE-2026-33186
+RUN go get github.com/docker/cli@v29.2.0 google.golang.org/grpc@v1.79.3 && \
+    go mod tidy
 
-FROM scratch
+RUN go build -ldflags="-s -w -extldflags '-static' -X github.com/aquasecurity/trivy/pkg/version/app.ver=${VERSION}" \
+    -trimpath -o trivy ./cmd/trivy
+
+RUN echo "trivy:x:1000:1000:trivy:/tmp:/sbin/nologin" > /etc/passwd.custom && \
+    echo "trivy:x:1000:" > /etc/group.custom && \
+    mkdir -p /empty_tmp/trivy-cache && \
+    chmod 1777 /empty_tmp && \
+    chown -R 1000:1000 /empty_tmp
+
+FROM scratch AS exporter
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /etc/passwd.custom /etc/passwd
 COPY --from=builder /etc/group.custom /etc/group
 COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
 COPY --from=builder --chown=1000:1000 /empty_tmp /tmp
-
-USER 1000:1000
-
 COPY --from=builder /build/trivy /usr/local/bin/trivy
 COPY --from=builder /build/contrib/*.tpl /contrib/
 
-ENV TZ=Asia/Bangkok
-ENV TRIVY_CACHE_DIR="/tmp/trivy-cache"
+FROM scratch
 
-ENTRYPOINT ["/usr/local/bin/trivy"]
+COPY --from=exporter / /
+
+USER 1000:1000
+
+ENV TZ=Asia/Bangkok \
+    TRIVY_CACHE_DIR="/tmp/trivy-cache"
+
+ENTRYPOINT ["trivy"]
