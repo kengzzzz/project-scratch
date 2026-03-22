@@ -1,8 +1,8 @@
 ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
 ARG GOLANG_DIGEST=sha256:8e02eb337d9e0ea459e041f1ee5eece41cbb61f1d83e7d883a3e2fb4862063fa
 
-FROM alpine@${ALPINE_DIGEST} AS alpine-base
-FROM golang@${GOLANG_DIGEST} AS golang-base
+FROM --platform=$BUILDPLATFORM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM --platform=$BUILDPLATFORM golang@${GOLANG_DIGEST} AS golang-base
 
 FROM alpine-base AS verifier
 
@@ -19,7 +19,7 @@ RUN git init . && \
 
 FROM golang-base AS builder
 
-ARG VERSION
+ARG VERSION TARGETOS TARGETARCH
 
 RUN apk add --no-cache tzdata ca-certificates
 
@@ -28,6 +28,8 @@ WORKDIR /build
 COPY --from=verifier /verify/ ./
 
 ENV CGO_ENABLED=0 \
+    GOOS=${TARGETOS} \
+    GOARCH=${TARGETARCH} \
     GOEXPERIMENT=jsonv2
 
 # Patch CVE-2025-15558, CVE-2026-33186
