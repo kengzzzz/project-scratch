@@ -1,8 +1,8 @@
 ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
-ARG DEBIAN_DIGEST=sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430
+ARG DEBIAN_DIGEST=sha256:55a15a112b42be10bfc8092fcc40b6748dc236f7ef46a358d9392b339e9d60e8
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
-FROM debian:trixie-slim@${DEBIAN_DIGEST} AS debian-base
+FROM debian@${DEBIAN_DIGEST} AS debian-base
 
 FROM debian-base AS verifier
 
@@ -30,7 +30,8 @@ RUN set -ex; \
 
 FROM alpine-base AS builder
 
-RUN apk add --no-cache build-base libtool autoconf automake pkgconf curl python3 cmake ninja bash patch linux-headers ca-certificates
+RUN apk update && apk upgrade && apk add --no-cache \
+    build-base libtool autoconf automake pkgconf curl python3 cmake ninja bash patch linux-headers ca-certificates
 
 WORKDIR /src
 

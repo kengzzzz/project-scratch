@@ -1,10 +1,10 @@
 ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
-ARG GOLANG_DIGEST=sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e
-ARG RUST_DIGEST=sha256:ef7b340d4201444fa2757dfddfd4c03be9d2bde468de7b7a68b0e9fabb794334
+ARG GOLANG_DIGEST=sha256:2389ebfa5b7f43eeafbd6be0c3700cc46690ef842ad962f6c5bd6be49ed82039
+ARG RUST_DIGEST=sha256:ff0adc35894eb79586ce752a1b5a9eadc88b938c56d8f2b4b537b6258ff3fa10
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
-FROM golang:alpine@${GOLANG_DIGEST} AS golang-base
-FROM rust:alpine@${RUST_DIGEST} AS rust-base
+FROM golang@${GOLANG_DIGEST} AS golang-base
+FROM rust@${RUST_DIGEST} AS rust-base
 
 FROM alpine-base AS verifier
 
@@ -21,9 +21,11 @@ RUN git init . && \
 
 FROM rust-base AS builder
 
-ENV RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" CARGO_PROFILE_RELEASE_OPT_LEVEL="3" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" CARGO_PROFILE_RELEASE_LTO="fat" CARGO_PROFILE_RELEASE_PANIC="abort" CARGO_PROFILE_RELEASE_STRIP="true"
+ENV RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" \
+    CARGO_PROFILE_RELEASE_OPT_LEVEL="3" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" CARGO_PROFILE_RELEASE_LTO="fat" CARGO_PROFILE_RELEASE_PANIC="abort" CARGO_PROFILE_RELEASE_STRIP="true"
 
-RUN apk add --no-cache build-base sqlite-dev sqlite-static
+RUN apk update && apk upgrade && apk add --no-cache \
+    build-base sqlite-dev sqlite-static
 
 WORKDIR /src
 
