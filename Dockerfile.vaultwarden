@@ -1,16 +1,17 @@
-ARG DEBIAN_DIGEST=sha256:1d3c811171a08a5adaa4a163fbafd96b61b87aa871bbc7aa15431ac275d3d430
-ARG GOLANG_DIGEST=sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e
-ARG RUST_DIGEST=sha256:ef7b340d4201444fa2757dfddfd4c03be9d2bde468de7b7a68b0e9fabb794334
+ARG DEBIAN_DIGEST=sha256:26f98ccd92fd0a44d6928ce8ff8f4921b4d2f535bfa07555ee5d18f61429cf0c
+ARG GOLANG_DIGEST=sha256:2389ebfa5b7f43eeafbd6be0c3700cc46690ef842ad962f6c5bd6be49ed82039
+ARG RUST_DIGEST=sha256:ff0adc35894eb79586ce752a1b5a9eadc88b938c56d8f2b4b537b6258ff3fa10
 
-FROM debian:trixie-slim@${DEBIAN_DIGEST} AS debian-base
-FROM golang:alpine@${GOLANG_DIGEST} AS golang-base
-FROM rust:alpine@${RUST_DIGEST} AS rust-base
+FROM debian@${DEBIAN_DIGEST} AS debian-base
+FROM golang@${GOLANG_DIGEST} AS golang-base
+FROM rust@${RUST_DIGEST} AS rust-base
 
 FROM debian-base AS verifier
 
 ARG VW_COMMIT_HASH WV_VERSION WV_SHA256
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl git ca-certificates coreutils && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git ca-certificates coreutils && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /verify
 
@@ -39,11 +40,12 @@ RUN cd web-vault && find . -name "*.map" -type f -delete && find . -name "*.txt"
 
 FROM rust-base AS backend
 
-ARG VW_VERSION
+RUN apk update && apk upgrade && apk add --no-cache \
+    build-base pkgconfig openssl-dev openssl-libs-static sqlite-dev sqlite-static
 
-RUN apk add --no-cache build-base pkgconfig openssl-dev openssl-libs-static sqlite-dev sqlite-static
-
-ENV OPENSSL_STATIC=1 RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" CARGO_PROFILE_RELEASE_OPT_LEVEL="3" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" CARGO_PROFILE_RELEASE_LTO="fat" CARGO_PROFILE_RELEASE_PANIC="abort" CARGO_PROFILE_RELEASE_STRIP="true"
+ENV OPENSSL_STATIC=1 \
+    RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" \
+	CARGO_PROFILE_RELEASE_OPT_LEVEL="3" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" CARGO_PROFILE_RELEASE_LTO="fat" CARGO_PROFILE_RELEASE_PANIC="abort" CARGO_PROFILE_RELEASE_STRIP="true"
 
 WORKDIR /rootfs
 
@@ -132,7 +134,8 @@ USER 1000:1000
 
 WORKDIR /data
 
-ENV WEB_VAULT_FOLDER=/web-vault TZ=Asia/Bangkok
+ENV WEB_VAULT_FOLDER=/web-vault \
+    TZ=Asia/Bangkok
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["healthcheck"]
 
