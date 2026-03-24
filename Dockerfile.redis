@@ -24,10 +24,12 @@ WORKDIR /build
 
 COPY --from=verifier /verify/ ./
 
-ENV CFLAGS="-O3 -flto=auto -no-pie -march=native -ffunction-sections -fdata-sections" \
-    LDFLAGS="-static -Wl,--gc-sections"
+ENV CFLAGS="-O3 -flto=auto -march=native -ffunction-sections -fdata-sections" \
+    BUILD_TLS=no \
+    REDIS_CFLAGS="-fno-PIE" \
+    REDIS_LDFLAGS="-static -no-pie -Wl,--gc-sections"
 
-RUN make -j "$(nproc)" BUILD_TLS=no
+RUN make -j "$(nproc)"
 
 RUN mkdir -p /rootfs/etc /rootfs/usr/local/bin /rootfs/usr/share/zoneinfo/Asia /rootfs/data && \
     echo "redis:x:1000:1000:redis:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && \
