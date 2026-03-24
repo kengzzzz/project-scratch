@@ -49,35 +49,57 @@ RUN mkdir -p usr/sbin sbin etc/ssl/certs usr/share/zoneinfo/Asia tmp var/lib/tai
 
 RUN chmod 1777 tmp run
 
-RUN nix-build -E ' \
-      let \
-        pkgs = import <nixpkgs> {}; \
-        optimizeCFlags = old: { \
-          NIX_CFLAGS_COMPILE = (old.env.NIX_CFLAGS_COMPILE or "") + " -O3 -fno-PIE -march=native -ffunction-sections -fdata-sections -Wno-error"; \
-          NIX_LDFLAGS = (old.env.NIX_LDFLAGS or "") + " --gc-sections"; \
-        }; \
-        opt-iptables = pkgs.pkgsStatic.iptables.overrideAttrs (old: { \
-          configureFlags = (old.configureFlags or []) ++ [ \
-            "--disable-connlabel" \
-            "--disable-devel" \
-          ]; \
-          env = (old.env or {}) // (optimizeCFlags old); \
-        }); \
-        opt-iproute2 = pkgs.pkgsStatic.iproute2.overrideAttrs (old: { \
-          env = (old.env or {}) // (optimizeCFlags old); \
-        }); \
-        stripBin = name: pkg: binPath: pkgs.runCommand "${name}-stripped" { \
-            nativeBuildInputs = [ pkgs.buildPackages.binutils ]; \
-          } "mkdir -p $out/bin && cp -L ${pkg}${binPath} $out/bin/${name} && chmod +w $out/bin/${name} && strip -s $out/bin/${name}"; \
-        iptables-stripped = stripBin "iptables" opt-iptables "/bin/iptables"; \
-        iproute2-stripped = stripBin "ip" opt-iproute2 "/bin/ip"; \
-      in \
-      pkgs.linkFarm "tools" [ \
-        { name = "iptables"; path = iptables-stripped; } \
-        { name = "ip";       path = iproute2-stripped; } \
-        { name = "cacert";   path = pkgs.cacert; } \
-        { name = "tzdata";   path = pkgs.tzdata; } \
-      ]' -o /tmp/outputs
+RUN cat <<'EOF' > build.nix
+let
+  pkgs = import <nixpkgs> {};
+  
+  optimizeCFlags = old: {
+    NIX_CFLAGS_COMPILE = (old.env.NIX_CFLAGS_COMPILE or "") + " -O3 -fno-PIE -march=native -ffunction-sections -fdata-sections -Wno-error";
+    NIX_LDFLAGS = (old.env.NIX_LDFLAGS or "") + " -no-pie --gc-sections";
+  };
+  
+  opt-iptables = pkgs.pkgsStatic.iptables.overrideAttrs (old: {
+    configureFlags = (old.configureFlags or []) ++ [
+      "--disable-connlabel"
+      "--disable-devel"
+    ];
+    env = (old.env or {}) // (optimizeCFlags old);
+  });
+  
+  opt-iproute2 = pkgs.pkgsStatic.iproute2.overrideAttrs (old: {
+    configureFlags = (old.configureFlags or []) ++ [
+      "--libbpf_force=off"
+      "--color=never"
+    ];
+    makeFlags = (old.makeFlags or []) ++ [
+      "HAVE_ELF=no"
+      "HAVE_MNL=no"
+      "HAVE_SELINUX=no"
+      "HAVE_CAP=no"
+      "HAVE_RPC=no"
+      "HAVE_BERKELEY_DB=no"
+      "TC_CONFIG_NO_XT=y"
+    ];
+    env = (old.env or {}) // (optimizeCFlags old);
+  });
+  
+  stripBin = name: pkg: binPath: pkgs.runCommand "${name}-stripped" {
+      nativeBuildInputs = [ pkgs.buildPackages.binutils ];
+    } "mkdir -p $out/bin && cp -L ${pkg}${binPath} $out/bin/${name} && chmod +w $out/bin/${name} && strip -s $out/bin/${name}";
+    
+  iptables-stripped = stripBin "iptables" opt-iptables "/bin/iptables";
+  iproute2-stripped = stripBin "ip" opt-iproute2 "/bin/ip";
+  
+in
+pkgs.linkFarm "tools" [
+  { name = "iptables"; path = iptables-stripped; }
+  { name = "ip";       path = iproute2-stripped; }
+  { name = "cacert";   path = pkgs.cacert; }
+  { name = "tzdata";   path = pkgs.tzdata; }
+]
+EOF
+
+RUN nix-build build.nix -o /tmp/outputs
 
 RUN cp -vL /tmp/outputs/iptables/bin/iptables ./usr/sbin/iptables && \
     cp -vL /tmp/outputs/ip/bin/ip ./sbin/ip && \
@@ -110,7 +132,7 @@ USER 1000:1000
 ENV HOME=/var/lib/tailscale \
     TZ=Asia/Bangkok
 
-HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 CMD  ["tailscale", "--socket=/tmp/tailscaled.sock", "status"]
+HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 CMD ["tailscale", "--socket=/tmp/tailscaled.sock", "status"]
 
 ENTRYPOINT ["tailscaled"]
 CMD ["--state=/var/lib/tailscale/tailscaled.state", "--socket=/tmp/tailscaled.sock", "--socks5-server=localhost:1055"]
