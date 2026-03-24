@@ -38,8 +38,10 @@ WORKDIR /src
 
 COPY --from=verifier /verify/ ./
 
-RUN ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-static-exe --enable-cachedb --with-libhiredis --with-pthreads --enable-tfo-client \
-    CFLAGS="-O3 -flto=auto -no-pie -march=native -ffunction-sections -fdata-sections"
+ENV CFLAGS="-O3 -flto=auto -march=native -ffunction-sections -fdata-sections -fno-PIE" \
+    LDFLAGS="-no-pie"
+
+RUN ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-static-exe --enable-cachedb --with-libhiredis --with-pthreads --enable-tfo-client
 
 RUN make -j "$(nproc)" LDFLAGS="-all-static -Wl,--gc-sections -lzstd -lz"
 
