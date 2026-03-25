@@ -32,7 +32,7 @@ WORKDIR /src
 COPY --from=verifier /verify/ ./
 
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && cargo build -p arti --release --locked \
-    --no-default-features --features "rustls,tokio,static-sqlite,dns-proxy,compression,onion-service-client,onion-service-service" \
+    --no-default-features --features "rustls,tokio,static-sqlite,compression,onion-service-client,onion-service-service,harden,vanguards" \
     --target "$TARGET" && mkdir -p /rootfs/usr/local/bin/ && cp "target/$TARGET/release/arti" /rootfs/usr/local/bin/arti
 
 FROM golang-base AS utils
