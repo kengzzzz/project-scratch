@@ -1,6 +1,6 @@
 ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
 ARG GOLANG_DIGEST=sha256:2389ebfa5b7f43eeafbd6be0c3700cc46690ef842ad962f6c5bd6be49ed82039
-ARG NIX_DIGEST=sha256:cf42be9911411150ed246632633e846ee185384d97c9a8a27e8ca15ab3a7a48f
+ARG NIX_DIGEST=sha256:0b1530edf840d9af519c7f3970cafbbed68d9d9554a83cc9adc04099753117e1
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
 FROM golang:alpine@${GOLANG_DIGEST} AS golang-base
@@ -43,11 +43,7 @@ RUN mkdir -p /rootfs/usr/local/bin /rootfs/etc && \
 
 FROM nix-base AS utils
 
-WORKDIR /rootfs
-
-RUN mkdir -p usr/sbin sbin etc/ssl/certs usr/share/zoneinfo/Asia tmp var/lib/tailscale run
-
-RUN chmod 1777 tmp run
+WORKDIR /build
 
 RUN cat <<'EOF' > build.nix
 let
@@ -101,11 +97,13 @@ EOF
 
 RUN nix-build build.nix -o /tmp/outputs
 
-RUN cp -vL /tmp/outputs/iptables/bin/iptables ./usr/sbin/iptables && \
-    cp -vL /tmp/outputs/ip/bin/ip ./sbin/ip && \
-    cp -vL /tmp/outputs/cacert/etc/ssl/certs/ca-bundle.crt ./etc/ssl/certs/ca-certificates.crt && \
-    cp -vL /tmp/outputs/tzdata/share/zoneinfo/Asia/Bangkok ./usr/share/zoneinfo/Asia/Bangkok && \
-    ln -s iptables ./usr/sbin/ip6tables
+RUN mkdir -p /rootfs/usr/sbin /rootfs/sbin /rootfs/etc/ssl/certs /rootfs/usr/share/zoneinfo/Asia /rootfs/tmp /rootfs/var/lib/tailscale /rootfs/run && \
+    chmod 1777 /rootfs/tmp /rootfs/run && \
+    cp -vL /tmp/outputs/iptables/bin/iptables /rootfs/usr/sbin/iptables && \
+    cp -vL /tmp/outputs/ip/bin/ip /rootfs/sbin/ip && \
+    cp -vL /tmp/outputs/cacert/etc/ssl/certs/ca-bundle.crt /rootfs/etc/ssl/certs/ca-certificates.crt && \
+    cp -vL /tmp/outputs/tzdata/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok && \
+    ln -s iptables /rootfs/usr/sbin/ip6tables
 
 FROM alpine-base AS exporter
 
