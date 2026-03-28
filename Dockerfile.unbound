@@ -39,11 +39,10 @@ WORKDIR /src
 COPY --from=verifier /verify/ ./
 
 ENV CFLAGS="-O3 -flto=auto -march=native -ffunction-sections -fdata-sections -fno-PIE" \
-    LDFLAGS="-no-pie"
+    LDFLAGS="-no-pie -Wl,--gc-sections -lzstd -lz"
 
-RUN ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-static-exe --enable-cachedb --with-libhiredis --with-pthreads --enable-tfo-client
-
-RUN make -j "$(nproc)" LDFLAGS="-all-static -Wl,--gc-sections -lzstd -lz"
+RUN ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-fully-static --enable-cachedb --with-libhiredis --with-pthreads --enable-tfo-client && \
+    make -j "$(nproc)"
 
 RUN mkdir -p /rootfs/usr/local/sbin /rootfs/etc/ssl/certs /rootfs/usr/share/zoneinfo/Asia /rootfs-writable/tmp /rootfs-writable/usr/local/etc/unbound && \
     cp unbound unbound-control /rootfs/usr/local/sbin/ && strip -s /rootfs/usr/local/sbin/* && \
