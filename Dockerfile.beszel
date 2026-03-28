@@ -1,44 +1,61 @@
-FROM golang:alpine@sha256:0a01b4d8a062521aff6cbdc51c836142ef92a440acebd33f07d95af868237d7e AS builder
+ARG ALPINE_DIGEST=sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+ARG GOLANG_DIGEST=sha256:2389ebfa5b7f43eeafbd6be0c3700cc46690ef842ad962f6c5bd6be49ed82039
 
-ARG VERSION COMMIT_HASH
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM golang:alpine@${GOLANG_DIGEST} AS golang-base
 
-RUN apk add --no-cache ca-certificates curl git unzip libstdc++ gcompat bash tzdata
+FROM alpine-base AS verifier
 
-RUN curl -fsSL https://bun.sh/install | bash
+ARG COMMIT_HASH
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /verify
+
+RUN git init . && \
+    git remote add origin https://github.com/henrygd/beszel.git && \
+    git fetch --depth 1 origin "${COMMIT_HASH}" && \
+    git checkout FETCH_HEAD
+
+FROM golang-base AS builder
+
+RUN apk add --no-cache ca-certificates curl unzip libstdc++ gcompat bash tzdata && \
+    curl -fsSL https://bun.sh/install | bash
+
 ENV PATH="/root/.bun/bin:${PATH}"
 
 WORKDIR /build
 
-RUN git clone --depth 1 --branch ${VERSION} https://github.com/henrygd/beszel.git . && \
-    [ -n "$COMMIT_HASH" ] && [ "$(git rev-parse HEAD)" = "$COMMIT_HASH" ] || { echo "Hash mismatch"; exit 1; }
+COPY --from=verifier /verify/ ./
 
 WORKDIR /build/internal/site
+
 RUN bun install && bun run build
 
 WORKDIR /build/internal/cmd/hub
 
-RUN CGO_ENABLED=0 go build \
-    -trimpath \
-    -ldflags="-w -s" \
-    -o /build/beszel-hub \
-    ./hub.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-w -s" -o /build/beszel-hub ./hub.go
 
-RUN echo "beszel:x:1000:1000:beszel:/app:/sbin/nologin" > /etc/passwd.custom && \
+RUN echo "beszel:x:1000:1000:beszel:/nonexistent:/sbin/nologin" > /etc/passwd.custom && \
     echo "beszel:x:1000:" > /etc/group.custom
 
-FROM scratch
+FROM scratch AS exporter
 
 COPY --from=builder /etc/passwd.custom /etc/passwd
 COPY --from=builder /etc/group.custom /etc/group
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /usr/share/zoneinfo/Asia/Bangkok /usr/share/zoneinfo/Asia/Bangkok
-COPY --from=builder /build/beszel-hub /hub
+COPY --from=builder /build/beszel-hub /usr/local/bin/hub
+
+FROM scratch
+
+COPY --from=exporter / /
 
 USER 1000:1000
 
 ENV TZ=Asia/Bangkok
 
-HEALTHCHECK --interval=120s --timeout=10s --start-period=10s --retries=3 CMD ["/hub", "health", "--url", "http://127.0.0.1:8090"]
+HEALTHCHECK --interval=120s --timeout=10s --start-period=10s --retries=3 CMD ["hub", "health", "--url", "http://127.0.0.1:8090"]
 
-ENTRYPOINT ["/hub"]
+ENTRYPOINT ["hub"]
 CMD ["serve", "--http", "0.0.0.0:8090"]
