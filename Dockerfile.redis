@@ -27,7 +27,7 @@ COPY --from=verifier /verify/ ./
 ENV CFLAGS="-O3 -flto=auto -march=native -ffunction-sections -fdata-sections" \
     BUILD_TLS=no \
     REDIS_CFLAGS="-fno-PIE" \
-    REDIS_LDFLAGS="-static -no-pie -Wl,--gc-sections"
+    REDIS_LDFLAGS="-static -flto=auto -no-pie -Wl,--gc-sections"
 
 RUN make -j "$(nproc)"
 
