@@ -44,7 +44,7 @@ RUN ./auto/configure \
     --with-stream_ssl_module \
     --with-pcre-jit \
     --with-cc-opt="-O3 -flto=auto -ffunction-sections -fdata-sections -march=native" \
-    --with-ld-opt="-static -Wl,--gc-sections -lzstd -lz" \
+    --with-ld-opt="-static -flto=auto -Wl,--gc-sections -lzstd -lz" \
     --without-http_gzip_module \
     --without-http_charset_module \
     --without-http_ssi_module \
