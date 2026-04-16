@@ -19,8 +19,13 @@ RUN git init . && \
 
 FROM debian-base AS builder
 
+ARG TARGETARCH
+
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     build-essential \
+    clang \
+    lld \
+    llvm \
     bison \
     flex \
     libssl-dev \
@@ -38,14 +43,21 @@ WORKDIR /src
 
 COPY --from=verifier /verify/ ./
 
-ENV CFLAGS="-O3 -flto=auto -march=native -ffunction-sections -fdata-sections -fno-PIE" \
-    LDFLAGS="-no-pie -Wl,--gc-sections -lzstd -lz"
+ENV CC="clang" \
+    CXX="clang++" \
+    AR="llvm-ar" \
+    NM="llvm-nm" \
+    RANLIB="llvm-ranlib" \
+    CPPFLAGS="-D_FORTIFY_SOURCE=0" 
 
-RUN ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-fully-static --enable-cachedb --with-libhiredis --with-pthreads --enable-tfo-client && \
+RUN if [ "$TARGETARCH" = "arm64" ]; then OPT_FLAG="-mcpu=native"; else OPT_FLAG="-march=native"; fi && \
+    export CFLAGS="-O3 $OPT_FLAG -flto -mllvm -polly -fno-math-errno -fno-trapping-math -falign-functions=32 -funroll-loops -fdata-sections -ffunction-sections -fno-PIE" && \
+    export LDFLAGS="-fuse-ld=lld -static -flto -Wl,--gc-sections -Wl,--icf=all -Wl,-O3 -Wl,-z,now -Wl,-z,relro -lzstd -lz" && \
+    ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-fully-static --enable-cachedb --with-libhiredis --with-pthreads --enable-tfo-client && \
     make -j "$(nproc)"
 
 RUN mkdir -p /rootfs/usr/local/sbin /rootfs/etc/ssl/certs /rootfs/usr/share/zoneinfo/Asia /rootfs-writable/tmp /rootfs-writable/usr/local/etc/unbound && \
-    cp unbound unbound-control /rootfs/usr/local/sbin/ && strip -s /rootfs/usr/local/sbin/* && \
+    cp unbound unbound-control /rootfs/usr/local/sbin/ && llvm-strip -s /rootfs/usr/local/sbin/* && \
     cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/ && \
     echo "unbound:x:1000:1000:unbound:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && echo "unbound:x:1000:" > /rootfs/etc/group && \
     curl -o /rootfs-writable/usr/local/etc/unbound/root.hints https://www.internic.net/domain/named.cache && ./unbound-anchor -a /rootfs-writable/usr/local/etc/unbound/root.key || true
