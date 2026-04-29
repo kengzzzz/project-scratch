@@ -1,0 +1,120 @@
+ARG ALPINE_DIGEST=sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+ARG DEBIAN_DIGEST=sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f54704f99cb061d2c5a
+
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM debian@${DEBIAN_DIGEST} AS debian-base
+
+FROM alpine-base AS busybox-builder
+
+RUN apk add --no-cache busybox-static
+
+FROM debian-base AS builder
+
+ARG VERSION
+ARG RUNNER_SHA256_AMD64
+ARG RUNNER_SHA256_ARM64
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    ca-certificates curl tar gzip dpkg-dev git libicu-dev libssl-dev zlib1g pax-utils file binutils gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && . /etc/os-release \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /rootfs
+
+RUN MULTIARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH); \
+    mkdir -p tmp usr/bin usr/sbin usr/lib/${MULTIARCH} usr/lib64 etc/ssl/certs home/runner/actions-runner usr/libexec/docker/cli-plugins dev; \
+    ln -sf usr/bin bin; \
+    ln -sf usr/sbin sbin; \
+    ln -sf usr/lib lib; \
+    ln -sf usr/lib64 lib64
+
+RUN DPKG_ARCH=$(dpkg --print-architecture) && \
+    case "$DPKG_ARCH" in \
+        amd64) RUNNER_ARCH="x64"; RUNNER_SHA256="$RUNNER_SHA256_AMD64" ;; \
+        arm64) RUNNER_ARCH="arm64"; RUNNER_SHA256="$RUNNER_SHA256_ARM64" ;; \
+        *) exit 1 ;; \
+    esac && \
+    [ -n "$VERSION" ] && [ -n "$RUNNER_SHA256" ] && \
+    RUNNER_TARBALL="actions-runner-linux-${RUNNER_ARCH}-${VERSION}.tar.gz" && \
+    curl -fsSLO "https://github.com/actions/runner/releases/download/v${VERSION}/${RUNNER_TARBALL}" && \
+    echo "${RUNNER_SHA256}  ${RUNNER_TARBALL}" | sha256sum -c - && \
+    tar -xzf "${RUNNER_TARBALL}" -C /rootfs/home/runner/actions-runner && \
+    rm -f "${RUNNER_TARBALL}"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        docker-ce-cli \
+        docker-compose-plugin && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=busybox-builder /bin/busybox.static /rootfs/usr/bin/busybox
+
+RUN cp -a /etc/ssl/certs/. /rootfs/etc/ssl/certs/; \
+    echo "root:x:0:0:root:/root:/usr/bin/bash" > /rootfs/etc/passwd; \
+    echo "runner:x:1000:1000:GitHub Runner:/home/runner:/usr/bin/bash" >> /rootfs/etc/passwd; \
+    echo "root:x:0:" > /rootfs/etc/group; \
+    echo "runner:x:1000:" >> /rootfs/etc/group; \
+    chmod +x /rootfs/usr/bin/busybox; \
+    /rootfs/usr/bin/busybox --list-full | while read -r applet_path; do \
+        [ "$applet_path" = "usr/bin/busybox" ] && continue; \
+        mkdir -p "/rootfs/$(dirname "$applet_path")"; \
+        ln -sf /usr/bin/busybox "/rootfs/$applet_path"; \
+    done
+
+RUN cp -L /usr/bin/bash /rootfs/usr/bin/bash; \
+    cp -L /usr/bin/git /rootfs/usr/bin/git; \
+    cp -L /usr/bin/curl /rootfs/usr/bin/curl; \
+    cp -L /usr/bin/docker /rootfs/usr/bin/docker; \
+    cp -L /usr/bin/ldd /rootfs/usr/bin/ldd; \
+    cp -L /usr/sbin/ldconfig /rootfs/usr/sbin/ldconfig; \
+    if [ -f /usr/libexec/docker/cli-plugins/docker-compose ]; then \
+        cp -L /usr/libexec/docker/cli-plugins/docker-compose /rootfs/usr/libexec/docker/cli-plugins/docker-compose; \
+    elif [ -f /usr/lib/docker/cli-plugins/docker-compose ]; then \
+        cp -L /usr/lib/docker/cli-plugins/docker-compose /rootfs/usr/libexec/docker/cli-plugins/docker-compose; \
+    else \
+        exit 1; \
+    fi; \
+    cp -a --parents /usr/lib/git-core /rootfs/ || true
+
+RUN set -ex; \
+    MULTIARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH); \
+    find /rootfs -type f -exec sh -c 'file -b "$1" | grep -q "ELF.*dynamically linked" && echo "$1"' _ {} \; > /tmp/elf_files.txt; \
+    ls /usr/lib/${MULTIARCH}/libicu*.so* /usr/lib/${MULTIARCH}/libssl*.so* /usr/lib/${MULTIARCH}/libcrypto*.so* 2>/dev/null >> /tmp/scan_list.txt || true; \
+    cat /tmp/elf_files.txt >> /tmp/scan_list.txt; \
+    cat /tmp/scan_list.txt | while read f; do \
+        lddtree -l "$f" 2>/dev/null || true; \
+    done | awk '/^\// {print $0}' | grep -v "^/rootfs" | sort -u > /tmp/libs_symlinks.txt; \
+    cat /tmp/libs_symlinks.txt | xargs -r realpath 2>/dev/null | sort -u > /tmp/libs_targets.txt; \
+    cat /tmp/libs_symlinks.txt /tmp/libs_targets.txt | sort -u | sed 's|^/||' > /tmp/all_libs.txt; \
+    tar -cf - -C / -T /tmp/all_libs.txt | tar -xf - -C /rootfs
+
+COPY --chmod=755 scripts/entrypoint.sh /rootfs/scripts/entrypoint.sh
+RUN chown -R 1000:1000 /rootfs/home/runner /rootfs/tmp && \
+    cp -a /dev/null /rootfs/dev/null && \
+    cp -a /dev/urandom /rootfs/dev/urandom 2>/dev/null || true; \
+    find /rootfs -type f -exec sh -c ' \
+        TYPE=$(file -b "$1"); \
+        if echo "$TYPE" | grep -q "^ELF.*executable"; then strip -s "$1" 2>/dev/null || true; \
+        elif echo "$TYPE" | grep -q "^ELF.*shared object"; then strip --strip-unneeded "$1" 2>/dev/null || true; fi' _ {} \;
+
+FROM scratch
+
+COPY --from=builder /rootfs /
+
+ENV PATH="/home/runner/actions-runner/bin:/usr/lib/git-core:/usr/bin:/bin" \
+    HOME="/home/runner"
+
+WORKDIR /home/runner/actions-runner
+
+USER 1000:1000
+
+HEALTHCHECK --interval=1m --timeout=10s --retries=3 --start-period=30s \
+  CMD test -f .runner || exit 1
+
+ENTRYPOINT ["/scripts/entrypoint.sh"]
