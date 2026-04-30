@@ -51,8 +51,8 @@ ENV CC="clang" \
     CPPFLAGS="-D_FORTIFY_SOURCE=0" 
 
 RUN if [ "$TARGETARCH" = "arm64" ]; then OPT_FLAG="-mcpu=native"; else OPT_FLAG="-march=native"; fi && \
-    export CFLAGS="-O3 $OPT_FLAG -flto -mllvm -polly -fno-math-errno -fno-trapping-math -falign-functions=32 -funroll-loops -fdata-sections -ffunction-sections -fno-PIE" && \
-    export LDFLAGS="-fuse-ld=lld -static -flto -Wl,--gc-sections -Wl,--icf=all -Wl,-O3 -Wl,-z,now -Wl,-z,relro -lzstd -lz" && \
+    export CFLAGS="-O3 $OPT_FLAG -flto -fno-math-errno -fno-trapping-math -fno-PIE" && \
+    export LDFLAGS="-fuse-ld=lld -static -flto -Wl,-O3 -Wl,-z,now -Wl,-z,relro -lzstd -lz" && \
     ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-fully-static --enable-cachedb --with-libhiredis --with-pthreads --enable-tfo-client && \
     make -j "$(nproc)"
 
