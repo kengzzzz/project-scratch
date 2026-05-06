@@ -30,15 +30,15 @@ FROM debian-base AS frontend
 
 WORKDIR /rootfs
 
-RUN mkdir web-vault
-
 COPY --from=verifier /verified-web ./web-vault
 
-RUN cd web-vault && find . -name "*.map" -type f -delete && find . -name "*.txt" -type f -delete && rm -rf videos && \
+RUN cd web-vault && find . -name "*.map" -type f -delete && rm -rf videos && \
     if [ -d "locales" ]; then find locales -maxdepth 1 -type d ! -name "locales" ! -name "en" -exec rm -rf {} +; fi && \
     find . -type d -exec chmod 755 {} + && find . -type f -exec chmod 444 {} +
 
 FROM rust-base AS backend
+
+ARG VW_VERSION
 
 RUN apk update && apk upgrade && apk add --no-cache \
     build-base pkgconfig openssl-dev openssl-libs-static sqlite-dev sqlite-static
@@ -52,7 +52,7 @@ WORKDIR /rootfs
 COPY --from=verifier /verified-src .
 
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
-    cargo build --features "sqlite,enable_mimalloc" --release --locked --target "$TARGET" && \
+    VW_VERSION="${VW_VERSION}" cargo build --features "sqlite,enable_mimalloc" --release --locked --target "$TARGET" && \
     mkdir -p usr/local/bin && cp "target/$TARGET/release/vaultwarden" usr/local/bin/vaultwarden
 
 FROM golang-base AS utils
@@ -71,35 +71,88 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
+
+func readEnvFile(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || key == "" {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+		_ = os.Setenv(strings.TrimSpace(key), value)
+	}
+}
+
+func basePathFromDomain(domain string) string {
+	if domain == "" {
+		return ""
+	}
+	if parts := strings.SplitN(domain, "://", 2); len(parts) == 2 {
+		domain = parts[1]
+	}
+	if idx := strings.IndexByte(domain, '/'); idx >= 0 {
+		return strings.TrimRight(domain[idx:], "/")
+	}
+	return ""
+}
+
 func main() {
+	envFile := os.Getenv("ENV_FILE")
+	if envFile == "" {
+		envFile = "/.env"
+	}
+	readEnvFile(envFile)
+
+	dataFolder := os.Getenv("DATA_FOLDER")
+	if dataFolder == "" {
+		dataFolder = "/data"
+	}
 	port := os.Getenv("ROCKET_PORT")
-	if port == "" { port = "80" }
+	if port == "" {
+		port = "80"
+	}
 	addr := os.Getenv("ROCKET_ADDRESS")
-	if addr == "" || addr == "0.0.0.0" || addr == "::" { addr = "127.0.0.1" }
-	basePath := ""
-	data, err := os.ReadFile("/data/config.json")
+	if addr == "" || addr == "0.0.0.0" || addr == "::" {
+		addr = "localhost"
+	}
+
+	domain := os.Getenv("DOMAIN")
+	data, err := os.ReadFile(filepath.Join(dataFolder, "config.json"))
 	if err == nil {
 		var cfg map[string]interface{}
 		if json.Unmarshal(data, &cfg) == nil {
-			if domain, ok := cfg["domain"].(string); ok && domain != "" {
-                domain = strings.TrimSuffix(domain, "/")
-				parts := strings.SplitN(domain, "://", 2)
-				if len(parts) == 2 {
-					paths := strings.Split(parts[1], "/")
-					if len(paths) > 1 {
-						basePath = "/" + strings.Join(paths[1:], "/")
-					}
-				}
+			if configDomain, ok := cfg["domain"].(string); ok && configDomain != "" {
+				domain = configDomain
 			}
 		}
 	}
+
+	basePath := basePathFromDomain(domain)
 	protocol := "http"
-	if _, ok := os.LookupEnv("ROCKET_TLS"); ok { protocol = "https" }
+	if _, ok := os.LookupEnv("ROCKET_TLS"); ok {
+		protocol = "https"
+	}
 	url := fmt.Sprintf("%s://%s:%s%s/alive", protocol, addr, port, basePath)
-    url = strings.ReplaceAll(url, "//alive", "/alive")
 	client := &http.Client{
 		Timeout: 2 * time.Second,
 		Transport: &http.Transport{
