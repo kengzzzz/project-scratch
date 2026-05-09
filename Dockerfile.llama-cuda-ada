@@ -1,0 +1,182 @@
+ARG UBUNTU_VERSION=24.04
+ARG CUDA_VERSION=12.8.1
+ARG BASE_CUDA_DEV_CONTAINER=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
+ARG LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp.git
+ARG LLAMA_CPP_COMMIT=b46812de78f8fbcb6cf0154947e8633ebc78d9ac
+
+FROM ${BASE_CUDA_DEV_CONTAINER} AS source
+
+ARG LLAMA_CPP_REPO
+ARG LLAMA_CPP_COMMIT
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates git && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+RUN git init llama.cpp && \
+    cd llama.cpp && \
+    git remote add origin "${LLAMA_CPP_REPO}" && \
+    git fetch --depth 1 origin "${LLAMA_CPP_COMMIT}" && \
+    git checkout --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${LLAMA_CPP_COMMIT}"
+
+FROM ${BASE_CUDA_DEV_CONTAINER} AS build
+
+ARG CUDA_ARCH=89-real
+ARG CUDA_COMPRESSION_MODE=speed
+ARG LLAMA_CPP_COMMIT
+ARG CMAKE_BUILD_PARALLEL_LEVEL
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        gcc-14 \
+        g++-14 \
+        git \
+        libgomp1 \
+        ninja-build \
+        python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV CC=gcc-14 \
+    CXX=g++-14 \
+    CUDAHOSTCXX=g++-14
+
+WORKDIR /src/llama.cpp
+COPY --from=source /src/llama.cpp/ ./
+
+RUN cmake -S . -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}" \
+      -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
+      -DGGML_NATIVE=OFF \
+      -DGGML_CUDA=ON \
+      -DGGML_CUDA_CUB_3DOT2=ON \
+      -DGGML_CUDA_NCCL=OFF \
+      -DGGML_CUDA_COMPRESSION_MODE="${CUDA_COMPRESSION_MODE}" \
+      -DGGML_BACKEND_DL=ON \
+      -DGGML_CPU_ALL_VARIANTS=ON \
+      -DLLAMA_OPENSSL=OFF \
+      -DLLAMA_BUILD_TESTS=OFF \
+      -DLLAMA_BUILD_EXAMPLES=OFF \
+      -DLLAMA_BUILD_TOOLS=ON \
+      -DLLAMA_BUILD_SERVER=ON && \
+    cmake --build build --target llama-server llama-bench
+
+RUN mkdir -p /out/app /out/meta && \
+    cp -a build/bin/llama-server /out/app/ && \
+    cp -a build/bin/llama-bench /out/app/ && \
+    find build/bin -maxdepth 1 -name '*.so*' -exec cp -a {} /out/app/ \; && \
+    find /out/app -type f -perm /111 -exec strip --strip-unneeded {} + || true && \
+    find /out/app -type f -name '*.so*' -exec strip --strip-unneeded {} + || true && \
+    printf '%s\n' "${LLAMA_CPP_COMMIT}" > /out/meta/llama.cpp.commit && \
+    cmake -LA -N build > /out/meta/cmake-cache.txt && \
+    (cd /out/app && find . -maxdepth 1 -type f -printf '%P\n' | sort) > /out/meta/app-files.txt
+
+FROM build AS rootfs
+
+RUN set -eu; \
+    mkdir -p /rootfs/app /rootfs/tmp /rootfs/etc /rootfs/usr/local/cuda/lib64 /rootfs/usr/local/nvidia/lib /rootfs/usr/local/nvidia/lib64 /rootfs/lib64 /rootfs/usr/lib /rootfs/lib /rootfs/meta; \
+    cp -a /out/app/. /rootfs/app/; \
+    cp -a /out/meta/. /rootfs/meta/; \
+    printf 'llama:x:1000:1000:llama:/nonexistent:/sbin/nologin\n' > /rootfs/etc/passwd; \
+    printf 'llama:x:1000:\n' > /rootfs/etc/group; \
+    chmod 1777 /rootfs/tmp
+
+RUN set -eu; \
+    scan_file() { \
+      file="$1"; \
+      readelf -d "$file" 2>/dev/null | awk '/NEEDED/ { gsub(/[\[\]]/, "", $5); print $5 }'; \
+      interp="$(readelf -l "$file" 2>/dev/null | awk -F': ' '/Requesting program interpreter/ { gsub(/]/, "", $2); print $2 }')"; \
+      if [ -n "$interp" ]; then printf '%s\n' "$interp"; fi; \
+    }; \
+    resolve_lib() { \
+      lib="$1"; \
+      case "$lib" in \
+        libcuda.so*|libnvidia-*) return 0 ;; \
+      esac; \
+      for dir in /rootfs/app /app /usr/local/cuda/lib64 /usr/local/nvidia/lib64 /usr/local/nvidia/lib /lib64 /usr/lib64 /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib /lib; do \
+        if [ -e "$dir/$lib" ]; then printf '%s\n' "$dir/$lib"; return 0; fi; \
+      done; \
+      if [ -e "$lib" ]; then printf '%s\n' "$lib"; return 0; fi; \
+      return 1; \
+    }; \
+    : > /tmp/queue; \
+    find /rootfs/app -maxdepth 1 -type f \( -perm /111 -o -name '*.so*' \) -print > /tmp/queue; \
+    : > /tmp/seen; \
+    : > /rootfs/meta/runtime-needed.txt; \
+    while [ -s /tmp/queue ]; do \
+      file="$(head -n 1 /tmp/queue)"; \
+      tail -n +2 /tmp/queue > /tmp/queue.next; \
+      mv /tmp/queue.next /tmp/queue; \
+      real="$(readlink -f "$file")"; \
+      grep -qxF "$real" /tmp/seen 2>/dev/null && continue; \
+      printf '%s\n' "$real" >> /tmp/seen; \
+      scan_file "$real" | while read -r needed; do \
+        [ -n "$needed" ] || continue; \
+        printf '%s -> %s\n' "$real" "$needed" >> /rootfs/meta/runtime-needed.txt; \
+        resolved="$(resolve_lib "$needed" || true)"; \
+        if [ -z "$resolved" ]; then \
+          printf 'UNRESOLVED %s needed by %s\n' "$needed" "$real" >> /rootfs/meta/unresolved-libs.txt; \
+          continue; \
+        fi; \
+        case "$resolved" in \
+          /rootfs/*) dest="$resolved" ;; \
+          *) dest="/rootfs$resolved"; mkdir -p "$(dirname "$dest")"; cp -a --parents "$resolved" /rootfs/ ;; \
+        esac; \
+        if [ -L "$resolved" ]; then \
+          target="$(readlink -f "$resolved")"; \
+          case "$target" in \
+            /rootfs/*) target_dest="$target" ;; \
+            *) target_dest="/rootfs$target"; mkdir -p "$(dirname "$target_dest")"; cp -a --parents "$target" /rootfs/ ;; \
+          esac; \
+          printf '%s\n' "$target_dest" >> /tmp/queue; \
+        else \
+          printf '%s\n' "$dest" >> /tmp/queue; \
+        fi; \
+      done; \
+    done; \
+    find /rootfs -type f \( -perm /111 -o -name '*.so*' \) -exec sh -c 'for f do echo "### $f"; readelf -d "$f" 2>/dev/null | grep NEEDED || true; done' sh {} + > /rootfs/meta/readelf-needed.txt; \
+    if [ -s /rootfs/meta/unresolved-libs.txt ]; then \
+      grep -v 'UNRESOLVED libcuda.so.1 ' /rootfs/meta/unresolved-libs.txt > /tmp/unresolved-real || true; \
+      test ! -s /tmp/unresolved-real; \
+    fi; \
+    if [ -e /rootfs/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 ]; then \
+      ln -sf ../usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /rootfs/lib64/ld-linux-x86-64.so.2; \
+    fi; \
+    for lib in libcudart.so.12 libcublas.so.12 libcublasLt.so.12; do \
+      target="$(find /rootfs/usr/local -type f -name "${lib}*" | sort | head -n 1)"; \
+      if [ -n "$target" ]; then ln -sf "$(printf '%s\n' "$target" | sed 's#^/rootfs##')" "/rootfs/usr/local/cuda/lib64/$lib"; fi; \
+    done; \
+    find /rootfs -type f -o -type l | sed 's#^/rootfs##' | sort > /rootfs/meta/rootfs-files.txt; \
+    cp -a /rootfs /server-rootfs; \
+    rm -f /server-rootfs/app/llama-bench; \
+    find /server-rootfs -type f -o -type l | sed 's#^/server-rootfs##' | sort > /server-rootfs/meta/rootfs-files.txt
+
+FROM scratch
+
+ARG LLAMA_CPP_COMMIT
+ARG CUDA_ARCH=89-real
+ARG CUDA_COMPRESSION_MODE=speed
+
+COPY --from=rootfs /server-rootfs/ /
+
+WORKDIR /app
+
+ENV LLAMA_ARG_HOST=0.0.0.0 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    LD_LIBRARY_PATH=/app:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
+    PATH=/app
+
+LABEL org.opencontainers.image.source="https://github.com/ggml-org/llama.cpp" \
+      org.opencontainers.image.revision="${LLAMA_CPP_COMMIT}" \
+      org.ggml.llama.cuda.arch="${CUDA_ARCH}" \
+      org.ggml.llama.cuda.compression_mode="${CUDA_COMPRESSION_MODE}"
+
+USER 1000:1000
+ENTRYPOINT ["/app/llama-server"]
