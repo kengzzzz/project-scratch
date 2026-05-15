@@ -24,12 +24,15 @@ WORKDIR /build
 
 COPY --from=verifier /verify/ ./
 
-ENV CFLAGS="-O3 -flto=auto -march=native -ffunction-sections -fdata-sections" \
-    BUILD_TLS=no \
-    REDIS_CFLAGS="-fno-PIE" \
-    REDIS_LDFLAGS="-static -flto=auto -no-pie -Wl,--gc-sections"
-
-RUN make -j "$(nproc)"
+RUN case "$(uname -m)" in \
+        aarch64|arm64) export CFLAGS="-O3 -flto=auto -mcpu=native -ffunction-sections -fdata-sections" ;; \
+        x86_64|amd64) export CFLAGS="-O3 -flto=auto -march=native -ffunction-sections -fdata-sections" ;; \
+        *) echo "Unsupported build architecture for native CPU tuning: $(uname -m)" >&2; exit 1 ;; \
+    esac && \
+    export BUILD_TLS=no \
+           REDIS_CFLAGS="-fno-PIE" \
+           REDIS_LDFLAGS="-static -flto=auto -no-pie -Wl,--gc-sections" && \
+    make -j "$(nproc)"
 
 RUN mkdir -p /rootfs/etc /rootfs/usr/local/bin /rootfs/usr/share/zoneinfo/Asia /rootfs/data && \
     echo "redis:x:1000:1000:redis:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && \

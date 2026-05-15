@@ -1,5 +1,5 @@
 ARG ALPINE_DIGEST=sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
-ARG DEBIAN_DIGEST=sha256:cedb1ef40439206b673ee8b33a46a03a0c9fa90bf3732f54704f99cb061d2c5a
+ARG DEBIAN_DIGEST=sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
 FROM debian@${DEBIAN_DIGEST} AS debian-base
@@ -27,7 +27,12 @@ WORKDIR /src
 
 COPY --from=verifier /verify/ ./
 
-RUN ./auto/configure \
+RUN case "$(uname -m)" in \
+        aarch64|arm64) CC_OPT="-O3 -flto=auto -ffunction-sections -fdata-sections -mcpu=native" ;; \
+        x86_64|amd64) CC_OPT="-O3 -flto=auto -ffunction-sections -fdata-sections -march=native" ;; \
+        *) echo "Unsupported build architecture for native CPU tuning: $(uname -m)" >&2; exit 1 ;; \
+    esac && \
+    ./auto/configure \
     --sbin-path=/usr/local/bin/nginx \
     --error-log-path=/dev/stderr \
     --http-log-path=/dev/stdout \
@@ -43,7 +48,7 @@ RUN ./auto/configure \
     --with-stream \
     --with-stream_ssl_module \
     --with-pcre-jit \
-    --with-cc-opt="-O3 -flto=auto -ffunction-sections -fdata-sections -march=native" \
+    --with-cc-opt="$CC_OPT" \
     --with-ld-opt="-static -flto=auto -Wl,--gc-sections -lzstd -lz" \
     --without-http_gzip_module \
     --without-http_charset_module \
