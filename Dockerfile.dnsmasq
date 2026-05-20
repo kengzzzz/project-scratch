@@ -1,0 +1,157 @@
+ARG ALPINE_DIGEST=sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+
+FROM alpine@${ALPINE_DIGEST} AS alpine-base
+
+FROM alpine-base AS verifier
+
+ARG COMMIT_HASH
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /verify
+
+RUN test -n "${COMMIT_HASH}" && \
+    git init . && \
+    git remote add origin https://thekelleys.org.uk/git/dnsmasq.git && \
+    git fetch --depth 1 origin "${COMMIT_HASH}" && \
+    git checkout FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${COMMIT_HASH}"
+
+FROM alpine-base AS builder
+
+RUN apk update && apk upgrade && \
+    apk add --no-cache make gcc musl-dev linux-headers binutils file libcap-utils tzdata
+
+WORKDIR /src
+
+COPY --from=verifier /verify/ ./
+
+RUN sed -i \
+      -e 's/#define CHUSER "nobody"/#define CHUSER "dnsmasq"/' \
+      -e 's/#define CHGRP "dip"/#define CHGRP "dnsmasq"/' \
+      src/config.h
+
+RUN case "$(uname -m)" in \
+        aarch64|arm64) OPT_FLAG="-mcpu=native" ;; \
+        x86_64|amd64) OPT_FLAG="-march=native" ;; \
+        *) echo "Unsupported build architecture for native CPU tuning: $(uname -m)" >&2; exit 1 ;; \
+    esac && \
+    make -j "$(nproc)" \
+      CC=gcc \
+      CFLAGS="-O3 ${OPT_FLAG} -flto=auto -ffunction-sections -fdata-sections -fno-PIE" \
+      LDFLAGS="-static -flto=auto -no-pie -Wl,--gc-sections" \
+      COPTS="-DNO_TFTP -DNO_SCRIPT -DNO_AUTH -DNO_DUMPFILE -DNO_LOOP -DNO_INOTIFY -DNO_IPSET -DLEASEFILE='\"/data/dnsmasq.leases\"' -DRUNFILE='\"/tmp/dnsmasq.pid\"'"
+
+RUN cat <<'EOF' > /tmp/healthcheck.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int comm_is_dnsmasq(void) {
+    FILE *f = fopen("/proc/1/comm", "r");
+    char comm[64];
+
+    if (!f) return 0;
+    if (!fgets(comm, sizeof(comm), f)) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    comm[strcspn(comm, "\n")] = '\0';
+    return strcmp(comm, "dnsmasq") == 0;
+}
+
+static int has_udp67_socket(const char *path) {
+    FILE *f = fopen(path, "r");
+    char line[512];
+
+    if (!f) return 0;
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return 0;
+    }
+    while (fgets(line, sizeof(line), f)) {
+        unsigned int port = 0;
+
+        if (sscanf(line, " %*d: %*64[0-9A-Fa-f]:%X", &port) == 1 && port == 67) {
+            fclose(f);
+            return 1;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+static int has_packet_socket(void) {
+    FILE *f = fopen("/proc/net/packet", "r");
+    char line[512];
+
+    if (!f) return 0;
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return 0;
+    }
+    while (fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return 1;
+    }
+    fclose(f);
+    return 0;
+}
+
+int main(void) {
+    if (!comm_is_dnsmasq()) return 1;
+    if (has_udp67_socket("/proc/net/udp")) return 0;
+    if (has_udp67_socket("/proc/net/udp6")) return 0;
+    if (has_packet_socket()) return 0;
+    return 1;
+}
+EOF
+
+RUN gcc -static -Os -s -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -o /tmp/healthcheck /tmp/healthcheck.c && \
+    file /src/src/dnsmasq /tmp/healthcheck | grep -q "statically linked" && \
+    ! readelf -l /src/src/dnsmasq /tmp/healthcheck | grep -q "INTERP" && \
+    ! readelf -d /src/src/dnsmasq /tmp/healthcheck 2>/dev/null | grep -q "NEEDED"
+
+RUN mkdir -p /rootfs/etc /rootfs/usr/local/sbin /rootfs/usr/local/bin /rootfs/usr/share/zoneinfo/Asia /rootfs-writable/data /rootfs-writable/tmp && \
+    echo "dnsmasq:x:1000:1000:dnsmasq:/data:/sbin/nologin" > /rootfs/etc/passwd && \
+    echo "dnsmasq:x:1000:" > /rootfs/etc/group && \
+    cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok && \
+    cp /src/src/dnsmasq /rootfs/usr/local/sbin/dnsmasq && \
+    cp /tmp/healthcheck /rootfs/usr/local/bin/healthcheck && \
+    strip -s /rootfs/usr/local/sbin/dnsmasq /rootfs/usr/local/bin/healthcheck && \
+    setcap 'cap_net_bind_service,cap_net_raw,cap_net_admin=+ep' /rootfs/usr/local/sbin/dnsmasq && \
+    chmod 1777 /rootfs-writable/tmp
+
+RUN cat <<'EOF' > /rootfs/etc/dnsmasq.conf
+port=0
+no-resolv
+no-hosts
+keep-in-foreground
+log-facility=-
+user=dnsmasq
+group=dnsmasq
+dhcp-leasefile=/data/dnsmasq.leases
+pid-file=/tmp/dnsmasq.pid
+EOF
+
+FROM scratch AS exporter
+
+COPY --from=builder /rootfs/ /
+
+COPY --from=builder --chown=1000:1000 /rootfs-writable/ /
+
+FROM scratch
+
+COPY --from=exporter / /
+
+USER 1000:1000
+
+WORKDIR /data
+
+ENV TZ=Asia/Bangkok
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["healthcheck"]
+
+ENTRYPOINT ["dnsmasq"]
+CMD ["--keep-in-foreground", "--conf-file=/etc/dnsmasq.conf"]
