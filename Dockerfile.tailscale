@@ -1,6 +1,6 @@
 ARG ALPINE_DIGEST=sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
-ARG GOLANG_DIGEST=sha256:c2a1f7b2095d046ae14b286b18413a05bb82c9bca9b25fe7ff5efef0f0826166
-ARG NIX_DIGEST=sha256:4e211f6763c542b08e9cdba448381286a3638903359390b46eab5f43ce6a6ed1
+ARG GOLANG_DIGEST=sha256:91eda9776261207ea25fd06b5b7fed8d397dd2c0a283e77f2ab6e91bfa71079d
+ARG NIX_DIGEST=sha256:bf1d938835ab96312f098fa6c2e9cab367728e0aad0646ee3e02a787c80d8fb8
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
 FROM golang@${GOLANG_DIGEST} AS golang-base
@@ -48,9 +48,10 @@ WORKDIR /build
 RUN cat <<'EOF' > build.nix
 let
   pkgs = import <nixpkgs> {};
+  cpuOpt = builtins.getEnv "CPU_OPT";
   
   optimizeCFlags = old: {
-    NIX_CFLAGS_COMPILE = (old.env.NIX_CFLAGS_COMPILE or "") + " -O3 -fno-PIE -march=native -ffunction-sections -fdata-sections -Wno-error";
+    NIX_CFLAGS_COMPILE = (old.env.NIX_CFLAGS_COMPILE or "") + " -O3 -fno-PIE " + cpuOpt + " -ffunction-sections -fdata-sections -Wno-error";
     NIX_LDFLAGS = (old.env.NIX_LDFLAGS or "") + " -no-pie --gc-sections";
   };
   
@@ -95,7 +96,13 @@ pkgs.linkFarm "tools" [
 ]
 EOF
 
-RUN nix-build build.nix -o /tmp/outputs
+RUN case "$(uname -m)" in \
+        aarch64|arm64) CPU_OPT="-mcpu=native" ;; \
+        x86_64|amd64) CPU_OPT="-march=native" ;; \
+        *) echo "Unsupported build architecture for native CPU tuning: $(uname -m)" >&2; exit 1 ;; \
+    esac && \
+    export CPU_OPT && \
+    nix-build build.nix -o /tmp/outputs
 
 RUN mkdir -p /rootfs/usr/sbin /rootfs/sbin /rootfs/etc/ssl/certs /rootfs/usr/share/zoneinfo/Asia /rootfs/tmp /rootfs/var/lib/tailscale /rootfs/run && \
     chmod 1777 /rootfs/tmp /rootfs/run && \
