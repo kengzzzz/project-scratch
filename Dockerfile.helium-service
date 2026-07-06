@@ -13,7 +13,7 @@ RUN apk add --no-cache git ca-certificates
 WORKDIR /verify
 
 RUN git init . && \
-    git remote add origin https://github.com/kengzzzz/helium-service-rs.git && \
+    git remote add origin https://github.com/kengzzzz/helium-service.git && \
     git fetch --depth 1 origin "${COMMIT_HASH}" && \
     git checkout FETCH_HEAD
 
@@ -31,13 +31,14 @@ COPY --from=verifier /verify/ ./
 
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
     cargo build --release --locked --target "$TARGET" --bin helium-service && \
-    mkdir -p /rootfs/etc/ssl/certs /rootfs/usr/local/bin /rootfs/app /rootfs/tmp && \
+    mkdir -p /rootfs/etc/ssl/certs /rootfs/usr/local/bin /rootfs/app /rootfs/tmp/helium-dictionaries && \
     cp "target/$TARGET/release/helium-service" /rootfs/usr/local/bin/helium-service && \
     cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && \
     echo "helium:x:1000:1000:helium:/app:/sbin/nologin" > /rootfs/etc/passwd && \
     echo "helium:x:1000:" > /rootfs/etc/group && \
     chmod 1777 /rootfs/tmp && \
-    chown 1000:1000 /rootfs/app
+    chown 1000:1000 /rootfs/app && \
+    chown 1000:1000 /rootfs/tmp/helium-dictionaries
 
 FROM scratch AS exporter
 
