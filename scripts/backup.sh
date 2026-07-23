@@ -16,7 +16,8 @@ if [[ -n "${ZIP_PASSWORD_FILE:-}" ]]; then
         echo "[ERROR] ZIP_PASSWORD_FILE (${ZIP_PASSWORD_FILE}) is not readable"
         exit 1
     fi
-    ZIP_PASSWORD="$(tr -d '\r\n' < "${ZIP_PASSWORD_FILE}")"
+    ZIP_PASSWORD="$(<"${ZIP_PASSWORD_FILE}")"
+    ZIP_PASSWORD="${ZIP_PASSWORD%$'\r'}"
     if [[ -z "${ZIP_PASSWORD}" ]]; then
         echo "[ERROR] ZIP_PASSWORD_FILE (${ZIP_PASSWORD_FILE}) is empty"
         exit 1
