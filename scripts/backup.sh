@@ -8,6 +8,21 @@ TIMESTAMP=$(date +%Y%m%d)
 ARCHIVE_NAME="backup.${TIMESTAMP}.${ZIP_TYPE}"
 ARCHIVE_PATH="/tmp/${ARCHIVE_NAME}"
 
+# Prefer a mounted secret file (ZIP_PASSWORD_FILE) over the inline ZIP_PASSWORD.
+# A configured file that is unreadable or empty is a hard error rather than a
+# silent failed/unusable backup. The value is never echoed.
+if [[ -n "${ZIP_PASSWORD_FILE:-}" ]]; then
+    if [[ ! -r "${ZIP_PASSWORD_FILE}" ]]; then
+        echo "[ERROR] ZIP_PASSWORD_FILE (${ZIP_PASSWORD_FILE}) is not readable"
+        exit 1
+    fi
+    ZIP_PASSWORD="$(tr -d '\r\n' < "${ZIP_PASSWORD_FILE}")"
+    if [[ -z "${ZIP_PASSWORD}" ]]; then
+        echo "[ERROR] ZIP_PASSWORD_FILE (${ZIP_PASSWORD_FILE}) is empty"
+        exit 1
+    fi
+fi
+
 echo "[INFO] Starting Vaultwarden backup: ${TIMESTAMP}"
 
 mkdir -p "${BACKUP_WORKDIR}"
