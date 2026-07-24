@@ -87,8 +87,7 @@ RUN case "$(uname -m)" in \
     --without-stream_return_module \
     --without-stream_upstream_hash_module \
     --without-stream_upstream_least_conn_module \
-    --without-stream_upstream_random_module \
-    --without-stream_upstream_zone_module
+    --without-stream_upstream_random_module
 
 RUN make -j$(nproc) && make DESTDIR=/rootfs install
 
