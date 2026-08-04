@@ -59,7 +59,7 @@ RUN case "$(uname -m)" in \
     make -j "$(nproc)"
 
 RUN mkdir -p /rootfs/usr/local/sbin /rootfs/etc/ssl/certs /rootfs/usr/share/zoneinfo/Asia /rootfs-writable/tmp /rootfs-writable/usr/local/etc/unbound && \
-    cp unbound unbound-control /rootfs/usr/local/sbin/ && llvm-strip -s /rootfs/usr/local/sbin/* && \
+    cp unbound unbound-control unbound-checkconf /rootfs/usr/local/sbin/ && llvm-strip -s /rootfs/usr/local/sbin/* && \
     cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/ && \
     echo "unbound:x:1000:1000:unbound:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && echo "unbound:x:1000:" > /rootfs/etc/group && \
     curl -o /rootfs-writable/usr/local/etc/unbound/root.hints https://www.internic.net/domain/named.cache && ./unbound-anchor -a /rootfs-writable/usr/local/etc/unbound/root.key || true
