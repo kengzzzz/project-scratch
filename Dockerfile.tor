@@ -1,4 +1,4 @@
-ARG ALPINE_DIGEST=sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+ARG ALPINE_DIGEST=sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 ARG GOLANG_DIGEST=sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2
 ARG RUST_DIGEST=sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900
 
@@ -32,7 +32,7 @@ WORKDIR /src
 COPY --from=verifier /verify/ ./
 
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && cargo build -p arti --release --locked \
-    --no-default-features --features "rustls,tokio,static-sqlite,compression,onion-service-client,onion-service-service,harden,vanguards" \
+    --no-default-features --features "rustls,tokio,static-sqlite,compression,onion-service-client,onion-service-service,harden,vanguards,flowctl-cc" \
     --target "$TARGET" && mkdir -p /rootfs/usr/local/bin/ && cp "target/$TARGET/release/arti" /rootfs/usr/local/bin/arti
 
 FROM golang-base AS utils
