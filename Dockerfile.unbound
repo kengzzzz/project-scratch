@@ -1,5 +1,5 @@
 ARG ALPINE_DIGEST=sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
-ARG DEBIAN_DIGEST=sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
+ARG DEBIAN_DIGEST=sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
 FROM debian@${DEBIAN_DIGEST} AS debian-base
@@ -26,6 +26,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     llvm \
     bison \
     flex \
+    libevent-dev \
     libssl-dev \
     libexpat1-dev \
     libhiredis-dev \
@@ -46,23 +47,26 @@ ENV CC="clang" \
     AR="llvm-ar" \
     NM="llvm-nm" \
     RANLIB="llvm-ranlib" \
-    CPPFLAGS="-D_FORTIFY_SOURCE=0" 
+    CPPFLAGS="-D_FORTIFY_SOURCE=3"
 
 RUN case "$(uname -m)" in \
         aarch64|arm64) OPT_FLAG="-mcpu=native" ;; \
         x86_64|amd64) OPT_FLAG="-march=native" ;; \
         *) echo "Unsupported build architecture for native CPU tuning: $(uname -m)" >&2; exit 1 ;; \
     esac && \
-    export CFLAGS="-O3 $OPT_FLAG -flto -fno-math-errno -fno-trapping-math -fno-PIE" && \
-    export LDFLAGS="-fuse-ld=lld -static -flto -Wl,-O3 -Wl,-z,now -Wl,-z,relro -lzstd -lz" && \
-    ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-fully-static --enable-cachedb --with-libhiredis --with-pthreads --enable-tfo-client && \
+    export CFLAGS="-O3 $OPT_FLAG -flto -fstack-protector-strong -fPIE -fno-math-errno -fno-trapping-math" && \
+    export LDFLAGS="-fuse-ld=lld -static-pie -flto -Wl,-O3 -Wl,-z,now -Wl,-z,relro -lzstd -lz" && \
+    ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-fully-static --enable-cachedb --with-libhiredis --with-libevent=/usr --with-pthreads --enable-tfo-client && \
     make -j "$(nproc)"
 
 RUN mkdir -p /rootfs/usr/local/sbin /rootfs/etc/ssl/certs /rootfs/usr/share/zoneinfo/Asia /rootfs-writable/tmp /rootfs-writable/usr/local/etc/unbound && \
     cp unbound unbound-control unbound-checkconf /rootfs/usr/local/sbin/ && llvm-strip -s /rootfs/usr/local/sbin/* && \
     cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ && cp /usr/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/ && \
     echo "unbound:x:1000:1000:unbound:/nonexistent:/sbin/nologin" > /rootfs/etc/passwd && echo "unbound:x:1000:" > /rootfs/etc/group && \
-    curl -o /rootfs-writable/usr/local/etc/unbound/root.hints https://www.internic.net/domain/named.cache && ./unbound-anchor -a /rootfs-writable/usr/local/etc/unbound/root.key || true
+    curl -fsS --retry 3 --retry-all-errors --max-time 60 -o /rootfs-writable/usr/local/etc/unbound/root.hints https://www.internic.net/domain/named.cache && \
+    (./unbound-anchor -a /rootfs-writable/usr/local/etc/unbound/root.key || :) && \
+    test -s /rootfs-writable/usr/local/etc/unbound/root.hints && \
+    test -s /rootfs-writable/usr/local/etc/unbound/root.key
 
 FROM scratch AS exporter
 
