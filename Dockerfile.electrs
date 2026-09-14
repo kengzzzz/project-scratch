@@ -20,7 +20,7 @@ RUN git init . && \
 FROM rust-base AS builder
 
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
-    build-essential cmake pkg-config libsnappy-dev libzstd-dev liblz4-dev zlib1g-dev libbz2-dev libssl-dev clang llvm-dev libclang-dev ca-certificates tzdata musl-tools && \
+    build-essential pkg-config libclang-dev ca-certificates musl-tools && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -29,7 +29,6 @@ COPY --from=verifier /verify/ ./
 
 ENV RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" \
     CXXFLAGS="-w -fpermissive -include cstdint" \
-    LIBROCKSDB_SYS_STATIC=1 \
     CARGO_PROFILE_RELEASE_OPT_LEVEL="3" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" CARGO_PROFILE_RELEASE_LTO="fat" CARGO_PROFILE_RELEASE_PANIC="abort" CARGO_PROFILE_RELEASE_STRIP="true"
 
 RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && cargo build --no-default-features --locked --release --target "$TARGET" && cp "target/$TARGET/release/electrs" target/release/electrs
