@@ -1,5 +1,5 @@
-ARG ALPINE_DIGEST=sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
-ARG GOLANG_DIGEST=sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125
+ARG ALPINE_DIGEST=sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+ARG GOLANG_DIGEST=sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414
 ARG NIX_DIGEST=sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
@@ -49,12 +49,12 @@ RUN cat <<'EOF' > build.nix
 let
   pkgs = import <nixpkgs> {};
   cpuOpt = builtins.getEnv "CPU_OPT";
-  
+
   optimizeCFlags = old: {
     NIX_CFLAGS_COMPILE = (old.env.NIX_CFLAGS_COMPILE or "") + " -O3 -fno-PIE " + cpuOpt + " -ffunction-sections -fdata-sections -Wno-error";
     NIX_LDFLAGS = (old.env.NIX_LDFLAGS or "") + " -no-pie --gc-sections";
   };
-  
+
   opt-iptables = pkgs.pkgsStatic.iptables.overrideAttrs (old: {
     configureFlags = (old.configureFlags or []) ++ [
       "--disable-connlabel"
@@ -62,7 +62,7 @@ let
     ];
     env = (old.env or {}) // (optimizeCFlags old);
   });
-  
+
   opt-iproute2 = pkgs.pkgsStatic.iproute2.overrideAttrs (old: {
     configureFlags = (old.configureFlags or []) ++ [
       "--libbpf_force=off"
@@ -79,14 +79,14 @@ let
     ];
     env = (old.env or {}) // (optimizeCFlags old);
   });
-  
+
   stripBin = name: pkg: binPath: pkgs.runCommand "${name}-stripped" {
       nativeBuildInputs = [ pkgs.buildPackages.binutils ];
     } "mkdir -p $out/bin && cp -L ${pkg}${binPath} $out/bin/${name} && chmod +w $out/bin/${name} && strip -s $out/bin/${name}";
-    
+
   iptables-stripped = stripBin "iptables" opt-iptables "/bin/iptables";
   iproute2-stripped = stripBin "ip" opt-iproute2 "/bin/ip";
-  
+
 in
 pkgs.linkFarm "tools" [
   { name = "iptables"; path = iptables-stripped; }

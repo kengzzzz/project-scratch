@@ -1,12 +1,7 @@
-ARG ALPINE_DIGEST=sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
-ARG GOLANG_DIGEST=sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125
-ARG NIX_DIGEST=sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
+ARG ALPINE_DIGEST=sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+ARG GOLANG_DIGEST=sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414
 
-FROM alpine@${ALPINE_DIGEST} AS alpine-base
-FROM golang@${GOLANG_DIGEST} AS golang-base
-FROM nixos/nix@${NIX_DIGEST} AS nix-base
-
-FROM alpine-base AS verifier
+FROM --platform=$BUILDPLATFORM alpine@${ALPINE_DIGEST} AS verifier
 
 ARG COMMIT_HASH
 
@@ -19,78 +14,36 @@ RUN git init . && \
     git fetch --depth 1 origin "${COMMIT_HASH}" && \
     git checkout FETCH_HEAD
 
-FROM golang-base AS builder
+FROM --platform=$BUILDPLATFORM golang@${GOLANG_DIGEST} AS builder
 
 ARG VERSION
+ARG TARGETARCH
 
 WORKDIR /src
 
 COPY --from=verifier /verify/ ./
 
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-w -s -X github.com/rclone/rclone/fs.Version=${VERSION}" -o rclone
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-w -s -X github.com/rclone/rclone/fs.Version=${VERSION}" -o rclone
 
-RUN mkdir -p /rootfs/usr/local/bin && cp rclone /rootfs/usr/local/bin/
+FROM alpine@${ALPINE_DIGEST} AS runtime
 
-FROM nix-base AS utils
+# GPG and Python run the complete backup inside the image. No hardware is needed
+# for public-key encryption; Python's SQLite backup API handles the live WAL.
+RUN apk add --no-cache ca-certificates gnupg python3 tar gzip tzdata && \
+    addgroup -g 1000 nonroot && \
+    adduser -D -H -u 1000 -G nonroot nonroot && \
+    mkdir -p /config/backup /config/rclone /backup-state && \
+    chown 1000:1000 /backup-state
 
-RUN mkdir -p /rootfs/tmp /rootfs/usr/local/bin /rootfs/etc/ssl/certs /rootfs/usr/share/zoneinfo/Asia /rootfs/bin && \
-    chmod 1777 /rootfs/tmp
+COPY --chmod=755 scripts/backup.sh scripts/restore.sh scripts/vaultwarden_backup.py /usr/local/bin/
 
-COPY /scripts/backup.sh /rootfs/usr/local/bin/backup.sh
+FROM runtime
 
-COPY /scripts/restore.sh /rootfs/usr/local/bin/restore.sh
-
-RUN nix-build -E ' \
-  let \
-    pkgs = import <nixpkgs> {}; \
-    _7zz-fixed = pkgs.pkgsStatic._7zz.overrideAttrs (old: { \
-      env = (old.env or {}) // { \
-        NIX_CFLAGS_COMPILE = (old.env.NIX_CFLAGS_COMPILE or "") + " -Wno-error"; \
-      }; \
-    }); \
-  in \
-  pkgs.symlinkJoin { \
-    name = "nix-rootfs"; \
-    paths = [ \
-      pkgs.pkgsStatic.sqlite \
-      _7zz-fixed \
-      pkgs.pkgsStatic.bash \
-      pkgs.pkgsStatic.coreutils \
-      pkgs.pkgsStatic.findutils \
-      pkgs.cacert \
-      pkgs.tzdata \
-    ]; \
-  }' -o /tmp/nix-rootfs
-
-RUN cp -L /tmp/nix-rootfs/bin/bash /rootfs/usr/local/bin/bash && \
-    cp -L /tmp/nix-rootfs/bin/coreutils /rootfs/usr/local/bin/coreutils && \
-    cp -L /tmp/nix-rootfs/bin/sqlite3 /rootfs/usr/local/bin/sqlite3 && \
-    cp -L /tmp/nix-rootfs/bin/7zz /rootfs/usr/local/bin/7zz && \
-    cp -L /tmp/nix-rootfs/bin/find /rootfs/usr/local/bin/find && \
-    for cmd in cp rm mkdir ls cat chmod chown du ln mv sleep touch echo date; do \
-      ln -s coreutils /rootfs/usr/local/bin/$cmd; \
-    done && \
-    chmod +x /rootfs/usr/local/bin/* && \
-    ln -s /usr/local/bin/bash /rootfs/bin/bash && \
-    cp -L /tmp/nix-rootfs/share/zoneinfo/Asia/Bangkok /rootfs/usr/share/zoneinfo/Asia/Bangkok && \
-    cp -L /tmp/nix-rootfs/etc/ssl/certs/ca-bundle.crt /rootfs/etc/ssl/certs/ca-certificates.crt && \
-    echo "nonroot:x:1000:1000:nonroot:/usr/local/bin:/sbin/nologin" > /rootfs/etc/passwd && echo "nonroot:x:1000:" > /rootfs/etc/group
-
-RUN nix-shell -p binutils --run "find /rootfs/usr/local/bin -type f -exec strip -s {} \;"
-
-FROM scratch AS exporter
-
-COPY --from=builder /rootfs/ /
-
-COPY --from=utils /rootfs/ /
-
-FROM scratch
-
-COPY --from=exporter / /
+COPY --from=builder /src/rclone /usr/local/bin/rclone
 
 USER 1000:1000
 
 ENV TZ=Asia/Bangkok
 
-ENTRYPOINT ["bash"]
-CMD ["-c", "backup.sh"]
+ENTRYPOINT ["/usr/local/bin/backup.sh"]
+CMD ["backup"]
