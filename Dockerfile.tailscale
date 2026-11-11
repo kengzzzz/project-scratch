@@ -47,7 +47,17 @@ WORKDIR /build
 
 RUN cat <<'EOF' > build.nix
 let
-  pkgs = import <nixpkgs> {};
+  # tzdata 2026e's now.ck check fails on a real clock after BC/Alberta/Jamaica
+  # rule changes take effect in Nov 2026; only the uncached static build runs it.
+  pkgs = import <nixpkgs> {
+    overlays = [
+      (final: prev: {
+        tzdata = if prev.stdenv.hostPlatform.isStatic
+          then prev.tzdata.overrideAttrs (_: { doCheck = false; })
+          else prev.tzdata;
+      })
+    ];
+  };
   cpuOpt = builtins.getEnv "CPU_OPT";
 
   optimizeCFlags = old: {
