@@ -1,6 +1,6 @@
 ARG DEBIAN_DIGEST=sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
 ARG GOLANG_DIGEST=sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523
-ARG RUST_DIGEST=sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33
+ARG RUST_DIGEST=sha256:3b199fd6db7d709274df56565b8f4003f9e30d7bfcff9d53148c86053b7855e2
 
 FROM debian@${DEBIAN_DIGEST} AS debian-base
 FROM golang@${GOLANG_DIGEST} AS golang-base
@@ -40,8 +40,9 @@ FROM rust-base AS backend
 
 ARG VW_VERSION
 
-RUN apk update && apk upgrade && apk add --no-cache \
-    build-base pkgconfig openssl-dev openssl-libs-static sqlite-dev sqlite-static
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    build-essential pkg-config libssl-dev zlib1g-dev libzstd-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 ENV OPENSSL_STATIC=1 \
     RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" \
@@ -51,7 +52,13 @@ WORKDIR /rootfs
 
 COPY --from=verifier /verified-src .
 
-RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
+RUN case "$(uname -m)" in \
+        aarch64|arm64) CPU_OPT="-mcpu=native" ;; \
+        x86_64|amd64) CPU_OPT="-march=native" ;; \
+        *) echo "Unsupported build architecture for native CPU tuning: $(uname -m)" >&2; exit 1 ;; \
+    esac && \
+    export CFLAGS="$CPU_OPT" CXXFLAGS="$CPU_OPT" && \
+    export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
     VW_VERSION="${VW_VERSION}" cargo build --features "sqlite,enable_mimalloc" --release --locked --target "$TARGET" && \
     mkdir -p usr/local/bin && cp "target/$TARGET/release/vaultwarden" usr/local/bin/vaultwarden
 

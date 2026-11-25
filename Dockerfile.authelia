@@ -1,8 +1,10 @@
 ARG ALPINE_DIGEST=sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 ARG GOLANG_DIGEST=sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523
+ARG GOLANG_DEBIAN_DIGEST=sha256:430985542100b871e108ccc00e8dcc5eef08ca14ee5825e98ebf563d8ffec4ee
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
 FROM golang@${GOLANG_DIGEST} AS golang-base
+FROM golang@${GOLANG_DEBIAN_DIGEST} AS golang-debian-base
 
 FROM alpine-base AS verifier
 
@@ -100,11 +102,9 @@ func main() {
 EOF
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o /healthcheck healthcheck.go
 
-FROM golang-base AS backend
+FROM golang-debian-base AS backend
 
 ARG VERSION COMMIT_HASH
-
-RUN apk add --no-cache git build-base fortify-headers sqlite-dev
 
 WORKDIR /build
 
@@ -125,7 +125,7 @@ RUN case "$(uname -m)" in \
     esac && \
     export CGO_CFLAGS="-O3 -flto=auto ${CPU_OPT}" && \
     BUILD_DATE=$(date -u +%a,\ %d\ %b\ %Y\ %H:%M:%S\ %Z) && \
-    LDFLAGS="-linkmode external -extldflags '-static' -s -w \
+    LDFLAGS="-linkmode external -extldflags '-static-pie' -s -w \
         -X '${X_UTILS}.BuildTag=${VERSION}' \
         -X '${X_UTILS}.BuildState=tagged clean' \
         -X '${X_UTILS}.BuildDate=${BUILD_DATE}' \

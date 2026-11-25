@@ -1,5 +1,5 @@
 ARG ALPINE_DIGEST=sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
-ARG RUST_DIGEST=sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33
+ARG RUST_DIGEST=sha256:3b199fd6db7d709274df56565b8f4003f9e30d7bfcff9d53148c86053b7855e2
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
 FROM rust@${RUST_DIGEST} AS rust-base
@@ -19,8 +19,9 @@ RUN git init . && \
 
 FROM rust-base AS builder
 
-RUN apk update && apk upgrade && apk add --no-cache \
-    build-base ca-certificates
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 ENV RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native"
 
@@ -28,7 +29,13 @@ WORKDIR /src
 
 COPY --from=verifier /verify/ ./
 
-RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
+RUN case "$(uname -m)" in \
+        aarch64|arm64) CPU_OPT="-mcpu=native" ;; \
+        x86_64|amd64) CPU_OPT="-march=native" ;; \
+        *) echo "Unsupported build architecture for native CPU tuning: $(uname -m)" >&2; exit 1 ;; \
+    esac && \
+    export CFLAGS="$CPU_OPT" CXXFLAGS="$CPU_OPT" && \
+    export TARGET=$(rustc -vV | sed -n 's/host: //p') && \
     cargo build --release --locked --target "$TARGET" --bin helium-service && \
     mkdir -p /rootfs/etc/ssl/certs /rootfs/usr/local/bin /rootfs/app /rootfs/tmp/helium-dictionaries && \
     cp "target/$TARGET/release/helium-service" /rootfs/usr/local/bin/helium-service && \

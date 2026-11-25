@@ -1,6 +1,8 @@
 ARG ALPINE_DIGEST=sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+ARG DEBIAN_DIGEST=sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
+FROM debian@${DEBIAN_DIGEST} AS debian-base
 
 FROM alpine-base AS verifier
 
@@ -15,10 +17,11 @@ RUN git init . && \
     git fetch --depth 1 origin "${COMMIT_HASH}" && \
     git checkout FETCH_HEAD
 
-FROM alpine-base AS builder
+FROM debian-base AS builder
 
-RUN apk update && apk upgrade && \
-    apk add --no-cache make gcc g++ linux-headers musl-dev tzdata pkgconf
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    make gcc g++ libc6-dev linux-libc-dev pkg-config tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 

@@ -1,6 +1,6 @@
 ARG ALPINE_DIGEST=sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 ARG GOLANG_DIGEST=sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523
-ARG RUST_DIGEST=sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33
+ARG RUST_DIGEST=sha256:3b199fd6db7d709274df56565b8f4003f9e30d7bfcff9d53148c86053b7855e2
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
 FROM golang@${GOLANG_DIGEST} AS golang-base
@@ -24,14 +24,21 @@ FROM rust-base AS builder
 ENV RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=native" \
     CARGO_PROFILE_RELEASE_OPT_LEVEL="3" CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1" CARGO_PROFILE_RELEASE_LTO="fat" CARGO_PROFILE_RELEASE_PANIC="abort" CARGO_PROFILE_RELEASE_STRIP="true"
 
-RUN apk update && apk upgrade && apk add --no-cache \
-    build-base sqlite-dev sqlite-static
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    build-essential && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
 COPY --from=verifier /verify/ ./
 
-RUN export TARGET=$(rustc -vV | sed -n 's/host: //p') && cargo build -p arti --release --locked \
+RUN case "$(uname -m)" in \
+        aarch64|arm64) CPU_OPT="-mcpu=native" ;; \
+        x86_64|amd64) CPU_OPT="-march=native" ;; \
+        *) echo "Unsupported build architecture for native CPU tuning: $(uname -m)" >&2; exit 1 ;; \
+    esac && \
+    export CFLAGS="$CPU_OPT" CXXFLAGS="$CPU_OPT" && \
+    export TARGET=$(rustc -vV | sed -n 's/host: //p') && cargo build -p arti --release --locked \
     --no-default-features --features "rustls,tokio,static-sqlite,compression,onion-service-client,onion-service-service,harden,vanguards" \
     --target "$TARGET" && mkdir -p /rootfs/usr/local/bin/ && cp "target/$TARGET/release/arti" /rootfs/usr/local/bin/arti
 
