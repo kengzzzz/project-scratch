@@ -1,5 +1,5 @@
 ARG ALPINE_DIGEST=sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
-ARG DEBIAN_DIGEST=sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+ARG DEBIAN_DIGEST=sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
 
 FROM alpine@${ALPINE_DIGEST} AS alpine-base
 FROM debian@${DEBIAN_DIGEST} AS debian-base
@@ -30,6 +30,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     libssl-dev \
     libexpat1-dev \
     libhiredis-dev \
+    libnghttp2-dev \
     zlib1g-dev \
     libzstd-dev \
     pkg-config \
@@ -56,7 +57,7 @@ RUN case "$(uname -m)" in \
     esac && \
     export CFLAGS="-O3 $OPT_FLAG -flto -fstack-protector-strong -fPIE -fno-math-errno -fno-trapping-math" && \
     export LDFLAGS="-fuse-ld=lld -static-pie -flto -Wl,-O3 -Wl,-z,now -Wl,-z,relro -lzstd -lz" && \
-    ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-fully-static --enable-cachedb --with-libhiredis --with-libevent=/usr --with-pthreads --enable-tfo-client && \
+    ./configure --with-run-dir=/tmp --with-pidfile=/tmp/unbound.pid --disable-shared --enable-fully-static --enable-cachedb --with-libhiredis --with-libnghttp2=/usr --with-libevent=/usr --with-pthreads --enable-tfo-client && \
     make -j "$(nproc)"
 
 RUN mkdir -p /rootfs/usr/local/sbin /rootfs/etc/ssl/certs /rootfs/usr/share/zoneinfo/Asia /rootfs-writable/tmp /rootfs-writable/usr/local/etc/unbound && \
